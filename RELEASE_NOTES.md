@@ -1,17 +1,15 @@
-## 0.1.0-alpha.4
+## 0.1.0-alpha.5
 
-Reliability fix based on exported on-device diagnostics.
+Deep lockscreen diagnostic build. This release intentionally avoids another speculative lockscreen workaround and instead records stronger public-API evidence around each wallpaper write.
 
-- Fix independent Home/Lock ordering: both destinations are prepared before application
-- Remove inline Home refill that previously delayed Lock application by tens of seconds
-- Empty pools fetch one image immediately; full replenishment runs asynchronously afterwards
-- Serialize rotations and cache mutations/refills inside the app process
-- Use a unique KEEP preload after rotations to prevent concurrent refill storms
-- Stop a refill after HTTP 429, DNS or socket failures instead of trying every remaining image
-- Automatic WorkManager failures wait for the next scheduled opportunity instead of immediate retry loops
-- Reduce ready pool from 24 to 8 images per profile, refill threshold from 6 to 2, and search-page cap from 4 to 2
-- Fix Strict suggestive-content filtering by removing undocumented multi-word brace exclusions
-- Keep Strict exclusions to Wallhaven's documented `-tagname` query syntax
-- Retain the bounded 100 / 250 / 500 MiB cache and anti-repeat history
+- Keep the alpha.4 rotation, rate-limit, cache and suggestive-content behavior unchanged
+- Save the exact cropped bitmap submitted to Home/Lock as bounded diagnostic previews (one file per destination)
+- Record SHA-256 of the source wallpaper and submitted preview
+- Record expected `WallpaperColors` derived from the submitted bitmap
+- Capture wallpaper ID, `WallpaperColors`, wallpaper-info state, keyguard state, screen interactive state and desired wallpaper dimensions before/after writes
+- For Lock writes, capture snapshots immediately, after 500 ms and after 2.5 s to detect quick replacement/reversion
+- Temporarily listen for `ACTION_WALLPAPER_CHANGED`, screen on/off/user-present broadcasts and `OnColorsChangedListener` callbacks around the write
+- Attach the latest submitted Home/Lock previews alongside the text report when sharing diagnostics
+- Do not request broad storage access just to read the Android wallpaper back
 
-The tag-based suggestive-content modes remain best-effort: Wallhaven tagging quality determines what can be filtered without image recognition.
+The goal of alpha.5 is diagnosis, not to assume an HONOR/MagicOS cause. Android 14+ prevents ordinary apps from reading the real wallpaper bitmap back through `getWallpaperFile()` without broad/privileged storage access, so the app uses IDs, colors, callbacks, state snapshots and the exact submitted image instead.

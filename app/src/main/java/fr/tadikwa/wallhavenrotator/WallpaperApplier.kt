@@ -53,12 +53,23 @@ object WallpaperApplier {
         val cropped = centerCrop(bitmap, targetWidth, targetHeight)
         if (cropped !== bitmap) bitmap.recycle()
 
+        val probe = WallpaperDeepDiagnostics.begin(
+            context = context,
+            manager = manager,
+            which = which,
+            destination = destination,
+            bitmap = cropped,
+            sourceFile = file
+        )
+
         try {
             val returnedId = manager.setBitmap(cropped, null, false, which)
-            val afterId = runCatching { manager.getWallpaperId(which) }.getOrDefault(-1)
             if (returnedId <= 0) {
                 error("WallpaperManager a refusé le fond d'écran $destination (ID retourné : $returnedId)")
             }
+
+            WallpaperDeepDiagnostics.afterSet(probe, returnedId)
+            val afterId = runCatching { manager.getWallpaperId(which) }.getOrDefault(-1)
             Diagnostics.log(
                 context,
                 "wallpaper.apply.success",
@@ -85,6 +96,7 @@ object WallpaperApplier {
             )
             throw failure
         } finally {
+            WallpaperDeepDiagnostics.end(probe)
             cropped.recycle()
         }
     }

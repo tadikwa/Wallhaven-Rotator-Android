@@ -1,8 +1,10 @@
 package fr.tadikwa.wallhavenrotator
 
 import android.app.WallpaperManager
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.core.content.FileProvider
@@ -11,6 +13,7 @@ import androidx.work.WorkManager
 import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
+import java.util.ArrayList
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -56,7 +59,12 @@ object Diagnostics {
         val appContext = context.applicationContext
         val exportDir = File(appContext.cacheDir, "diagnostics-export").apply { mkdirs() }
         exportDir.listFiles()?.forEach { old ->
-            if (System.currentTimeMillis() - old.lastModified() > 24L * 60L * 60L * 1000L) old.delete()
+            if (
+                old.name.startsWith("Wallhaven-Rotator-diagnostics-") &&
+                System.currentTimeMillis() - old.lastModified() > 24L * 60L * 60L * 1000L
+            ) {
+                old.delete()
+            }
         }
         val output = File(
             exportDir,
@@ -108,6 +116,13 @@ object Diagnostics {
             appendLine("setWallpaperAllowed=${runCatching { manager.isSetWallpaperAllowed() }.getOrDefault(false)}")
             appendLine("homeWallpaperId=$homeId")
             appendLine("lockWallpaperId=$lockId")
+            appendLine("homeDeepState=${WallpaperDeepDiagnostics.snapshotSummary(appContext, WallpaperManager.FLAG_SYSTEM)}")
+            appendLine("lockDeepState=${WallpaperDeepDiagnostics.snapshotSummary(appContext, WallpaperManager.FLAG_LOCK)}")
+            appendLine()
+            appendLine("[Submitted previews]")
+            WallpaperDeepDiagnostics.latestPreviewFiles(appContext).forEach { preview ->
+                appendLine("${preview.name}: bytes=${preview.length()},modified=${preview.lastModified()}")
+            }
             appendLine()
             appendLine("[Cache]")
             val cacheStats = cache.stats()
@@ -133,15 +148,36 @@ object Diagnostics {
     }
 
     fun shareIntent(context: Context, report: File): Intent {
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${BuildConfig.APPLICATION_ID}.fileprovider",
-            report
-        )
-        return Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
+        val files = buildList {
+            add(report)
+            addAll(WallpaperDeepDiagnostics.latestPreviewFiles(context.applicationContext))
+        }.filter { it.isFile }
+
+        val uris = ArrayList<Uri>(files.size)
+        files.forEach { file ->
+            uris += FileProvider.getUriForFile(
+                context,
+                "${BuildConfig.APPLICATION_ID}.fileprovider",
+                file
+            )
+        }
+
+        if (uris.size <= 1) {
+            return Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_SUBJECT, "Wallhaven Rotator - diagnostics")
+                putExtra(Intent.EXTRA_STREAM, uris.firstOrNull())
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        }
+
+        return Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = "*/*"
             putExtra(Intent.EXTRA_SUBJECT, "Wallhaven Rotator - diagnostics")
-            putExtra(Intent.EXTRA_STREAM, uri)
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            clipData = ClipData.newRawUri("Wallhaven Rotator diagnostics", uris.first()).also { clip ->
+                uris.drop(1).forEach { uri -> clip.addItem(ClipData.Item(uri)) }
+            }
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
     }
