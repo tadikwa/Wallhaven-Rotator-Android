@@ -16,7 +16,7 @@ class ContentFilterPolicyTest {
     }
 
     @Test
-    fun filteredModesKeepAnimeButExcludeYouthCodedAndSexualTags() {
+    fun filteredModesKeepAnimeQueryBroadEnoughForMetadataFallback() {
         val reduced = ContentFilterPolicy.compose("+anime", ContentFilterMode.REDUCED)
         val strict = ContentFilterPolicy.compose("+anime", ContentFilterMode.STRICT)
         assertTrue(reduced.contains("+anime"))
@@ -24,29 +24,77 @@ class ContentFilterPolicyTest {
         assertTrue(reduced.contains("-schoolgirl"))
         assertTrue(reduced.contains("-loli"))
         assertFalse(reduced.contains("-anime"))
-        // Strict deliberately uses the same broad query and tightens via metadata.
         assertEquals(reduced, strict)
     }
 
     @Test
-    fun metadataPassBlocksSchoolgirlInReducedAndMoreInStrict() {
-        assertTrue(
-            ContentFilterPolicy.blockedTags(
-                listOf("schoolgirl", "blonde", "anime"),
-                ContentFilterMode.REDUCED
-            ).contains("schoolgirl")
+    fun reducedRejectsObservedAdultTagsButKeepsOrdinaryAnimeGirls() {
+        val observedAdult = ContentFilterPolicy.blockedTags(
+            listOf("women", "Tori Black", "pornstar", "Tushy", "portrait display"),
+            ContentFilterMode.REDUCED
         )
+        assertTrue(observedAdult.contains("pornstar"))
+        assertTrue(observedAdult.contains("Tushy"))
+
         assertTrue(
             ContentFilterPolicy.blockedTags(
-                listOf("fishnet stockings", "portrait"),
-                ContentFilterMode.STRICT
-            ).contains("fishnet stockings")
-        )
-        assertTrue(
-            ContentFilterPolicy.blockedTags(
-                listOf("fishnet stockings", "portrait"),
+                listOf("anime", "anime girls", "blue hair", "fan art"),
                 ContentFilterMode.REDUCED
             ).isEmpty()
+        )
+    }
+
+    @Test
+    fun strictRejectsFemaleFocusedSubjectsEvenWithoutSexualTags() {
+        assertTrue(
+            ContentFilterPolicy.blockedTags(
+                listOf("anime", "anime girls", "Hololive", "blue hair"),
+                ContentFilterMode.STRICT
+            ).contains("anime girls")
+        )
+        assertTrue(
+            ContentFilterPolicy.blockedTags(
+                listOf("Cuban women", "actress", "portrait display"),
+                ContentFilterMode.STRICT
+            ).isNotEmpty()
+        )
+        assertTrue(
+            ContentFilterPolicy.blockedTags(
+                listOf("video game girls", "Arknights", "flowers"),
+                ContentFilterMode.STRICT
+            ).contains("video game girls")
+        )
+    }
+
+    @Test
+    fun strictKeepsNonFemaleAnimeAndScenery() {
+        assertTrue(
+            ContentFilterPolicy.blockedTags(
+                listOf("Solo Leveling", "Sung Jin Woo", "anime", "anime boys"),
+                ContentFilterMode.STRICT
+            ).isEmpty()
+        )
+        assertTrue(
+            ContentFilterPolicy.blockedTags(
+                listOf("Chinese dragon", "rice fields", "artwork"),
+                ContentFilterMode.STRICT
+            ).isEmpty()
+        )
+    }
+
+    @Test
+    fun strictBlocksObservedAssAndStockingsTags() {
+        assertTrue(
+            ContentFilterPolicy.blockedTags(
+                listOf("Genshin Impact", "anime girls", "ass"),
+                ContentFilterMode.STRICT
+            ).contains("ass")
+        )
+        assertTrue(
+            ContentFilterPolicy.blockedTags(
+                listOf("anime", "stockings", "wings"),
+                ContentFilterMode.STRICT
+            ).contains("stockings")
         )
     }
 

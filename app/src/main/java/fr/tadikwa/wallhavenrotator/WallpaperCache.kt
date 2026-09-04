@@ -105,6 +105,7 @@ class WallpaperCache(private val context: Context) {
         var metadataChecks = 0
         var contentRejected = 0
         var metadataLimitReached = false
+        var broadSearchFallbacks = 0
         var lastFailure: Throwable? = null
         var abortRefill = false
         var diskBudgetReached = stats().bytes >= CachePolicy.refillStopBytes(cacheLimitMb) && existing.isNotEmpty()
@@ -134,7 +135,7 @@ class WallpaperCache(private val context: Context) {
             !diskBudgetReached &&
             !abortRefill
         ) {
-            val result = try {
+            var result = try {
                 client.search(profile, orientation, page = page, seed = seed)
             } catch (failure: Throwable) {
                 lastFailure = failure
@@ -149,6 +150,48 @@ class WallpaperCache(private val context: Context) {
                 break
             }
             attempts += 1
+
+            // Query-side exclusions are only a first-pass optimisation. Some narrow
+            // Wallhaven listings can collapse to zero when negatives are combined.
+            // Retry the same SFW listing without automatic negative terms and keep the
+            // ORIGINAL profile for metadata inspection, so Reduced/Strict semantics
+            // remain enforced locally instead of failing with "no wallpaper".
+            val filteredQuery = ContentFilterPolicy.compose(profile.query, profile.contentFilter)
+            if (
+                result.items.isEmpty() &&
+                profile.contentFilter != ContentFilterMode.STANDARD &&
+                filteredQuery != profile.query.trim()
+            ) {
+                Diagnostics.log(
+                    context,
+                    "cache.search.filtered_empty_fallback",
+                    level = "WARN",
+                    fields = mapOf(
+                        "pool" to poolKey,
+                        "page" to page,
+                        "contentFilter" to profile.contentFilter.name,
+                        "filteredQuery" to filteredQuery.take(512),
+                        "fallbackQuery" to profile.query.trim().take(512)
+                    )
+                )
+                val broadProfile = profile.copy(contentFilter = ContentFilterMode.STANDARD)
+                result = try {
+                    client.search(broadProfile, orientation, page = page, seed = seed)
+                } catch (failure: Throwable) {
+                    lastFailure = failure
+                    abortRefill = shouldAbortRefill(failure)
+                    Diagnostics.log(
+                        context,
+                        "cache.search.fallback_failure",
+                        level = "ERROR",
+                        fields = mapOf("pool" to poolKey, "page" to page),
+                        throwable = failure
+                    )
+                    break
+                }
+                broadSearchFallbacks += 1
+            }
+
             if (profile.source == SourceMode.RANDOM && seed.isNullOrBlank()) seed = result.seed
 
             Diagnostics.log(
@@ -158,7 +201,8 @@ class WallpaperCache(private val context: Context) {
                     "pool" to poolKey,
                     "page" to page,
                     "items" to result.items.size,
-                    "lastPage" to result.lastPage
+                    "lastPage" to result.lastPage,
+                    "broadFallback" to (broadSearchFallbacks > 0)
                 )
             )
 
@@ -297,6 +341,7 @@ class WallpaperCache(private val context: Context) {
                 "metadataChecks" to metadataChecks,
                 "contentRejected" to contentRejected,
                 "metadataLimitReached" to metadataLimitReached,
+                "broadSearchFallbacks" to broadSearchFallbacks,
                 "diskBudgetReached" to diskBudgetReached,
                 "networkAbort" to abortRefill,
                 "cacheBytes" to stats().bytes
