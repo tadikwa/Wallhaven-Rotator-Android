@@ -1,5 +1,6 @@
 package fr.tadikwa.wallhavenrotator
 
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
@@ -43,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlin.concurrent.thread
 
 private sealed interface UpdateUiState {
     data object Idle : UpdateUiState
@@ -54,16 +56,37 @@ private sealed interface UpdateUiState {
     data class Error(val message: String) : UpdateUiState
 }
 
+private sealed interface ManualRotationUiState {
+    data object Idle : ManualRotationUiState
+    data object Running : ManualRotationUiState
+    data class Success(val message: String) : ManualRotationUiState
+    data class Error(val message: String) : ManualRotationUiState
+}
+
+private sealed interface DiagnosticsUiState {
+    data object Idle : DiagnosticsUiState
+    data object Exporting : DiagnosticsUiState
+    data class Error(val message: String) : DiagnosticsUiState
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        Diagnostics.log(applicationContext, "app.open")
+
         setContent {
             WallhavenRotatorTheme {
                 val context = LocalContext.current
                 val repository = remember { SettingsRepository(context) }
                 var settings by remember { mutableStateOf(repository.load()) }
                 var updateState by remember { mutableStateOf<UpdateUiState>(UpdateUiState.Idle) }
+                var manualRotationState by remember {
+                    mutableStateOf<ManualRotationUiState>(ManualRotationUiState.Idle)
+                }
+                var diagnosticsState by remember {
+                    mutableStateOf<DiagnosticsUiState>(DiagnosticsUiState.Idle)
+                }
 
                 fun applyUpdateResult(result: UpdateCheckResult) {
                     updateState = when (result) {
@@ -84,6 +107,8 @@ class MainActivity : ComponentActivity() {
                     settings = settings,
                     onSettingsChanged = { settings = it },
                     updateState = updateState,
+                    manualRotationState = manualRotationState,
+                    diagnosticsState = diagnosticsState,
                     onCheckUpdate = {
                         updateState = UpdateUiState.Checking
                         UpdateManager.checkAsync(context, manual = true, callback = ::applyUpdateResult)
@@ -108,6 +133,16 @@ class MainActivity : ComponentActivity() {
                     },
                     onSave = {
                         repository.save(settings)
+                        Diagnostics.log(
+                            context,
+                            "settings.save",
+                            fields = mapOf(
+                                "enabled" to settings.enabled,
+                                "intervalMinutes" to settings.intervalMinutes,
+                                "target" to settings.targetMode.name,
+                                "orientation" to settings.orientationMode.name
+                            )
+                        )
                         RotationScheduler.configure(context, settings)
                         if (settings.enabled) RotationScheduler.preload(context)
                         val message = if (settings.enabled) {
@@ -118,9 +153,68 @@ class MainActivity : ComponentActivity() {
                         Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
                     },
                     onRotateNow = {
-                        repository.save(settings)
-                        RotationScheduler.rotateNow(context)
-                        Toast.makeText(context, "Changement demandé.", Toast.LENGTH_SHORT).show()
+                        if (manualRotationState !is ManualRotationUiState.Running) {
+                            val snapshot = settings
+                            repository.save(snapshot)
+                            manualRotationState = ManualRotationUiState.Running
+                            Diagnostics.log(
+                                context,
+                                "manual_rotation.requested",
+                                fields = mapOf("target" to snapshot.targetMode.name)
+                            )
+                            thread(name = "wallhaven-manual-rotation") {
+                                val result = runCatching {
+                                    RotationEngine.rotateOnce(context.applicationContext, snapshot)
+                                }
+                                runOnUiThread {
+                                    if (!isDestroyed && !isFinishing) {
+                                        manualRotationState = result.fold(
+                                            onSuccess = { outcome ->
+                                                ManualRotationUiState.Success(outcome.userMessage())
+                                            },
+                                            onFailure = { failure ->
+                                                ManualRotationUiState.Error(
+                                                    failure.message ?: "Échec du changement de fond d'écran"
+                                                )
+                                            }
+                                        )
+                                        val toast = when (val state = manualRotationState) {
+                                            is ManualRotationUiState.Success -> state.message
+                                            is ManualRotationUiState.Error -> state.message
+                                            else -> null
+                                        }
+                                        if (toast != null) Toast.makeText(context, toast, Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    onShareDiagnostics = {
+                        if (diagnosticsState !is DiagnosticsUiState.Exporting) {
+                            val snapshot = settings
+                            diagnosticsState = DiagnosticsUiState.Exporting
+                            thread(name = "wallhaven-diagnostics-export") {
+                                val result = runCatching {
+                                    Diagnostics.createReport(context.applicationContext, snapshot)
+                                }
+                                runOnUiThread {
+                                    if (!isDestroyed && !isFinishing) {
+                                        result.fold(
+                                            onSuccess = { report ->
+                                                diagnosticsState = DiagnosticsUiState.Idle
+                                                val share = Diagnostics.shareIntent(context, report)
+                                                startActivity(Intent.createChooser(share, "Partager les diagnostics"))
+                                            },
+                                            onFailure = { failure ->
+                                                diagnosticsState = DiagnosticsUiState.Error(
+                                                    failure.message ?: "Impossible d'exporter les diagnostics"
+                                                )
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 )
             }
@@ -147,10 +241,13 @@ private fun MainScreen(
     settings: AppSettings,
     onSettingsChanged: (AppSettings) -> Unit,
     updateState: UpdateUiState,
+    manualRotationState: ManualRotationUiState,
+    diagnosticsState: DiagnosticsUiState,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: (UpdateInfo) -> Unit,
     onSave: () -> Unit,
-    onRotateNow: () -> Unit
+    onRotateNow: () -> Unit,
+    onShareDiagnostics: () -> Unit
 ) {
     val context = LocalContext.current
     Scaffold(
@@ -244,6 +341,13 @@ private fun MainScreen(
             }
 
             item {
+                DiagnosticsCard(
+                    state = diagnosticsState,
+                    onShare = onShareDiagnostics
+                )
+            }
+
+            item {
                 SettingCard("Cache et réseau") {
                     Text(
                         "La rotation consomme d'abord le cache local. Une recharge Wallhaven n'est déclenchée que lorsque le pool tombe à ${PoolPolicy.LOW_WATERMARK} images ou moins. Chaque pool vise ${PoolPolicy.TARGET_SIZE} images.",
@@ -260,9 +364,38 @@ private fun MainScreen(
                     Button(onClick = onSave, modifier = Modifier.weight(1f)) {
                         Text("Enregistrer")
                     }
-                    OutlinedButton(onClick = onRotateNow, modifier = Modifier.weight(1f)) {
-                        Text("Changer maintenant")
+                    OutlinedButton(
+                        onClick = onRotateNow,
+                        enabled = manualRotationState !is ManualRotationUiState.Running,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            if (manualRotationState is ManualRotationUiState.Running) {
+                                "Changement…"
+                            } else {
+                                "Changer maintenant"
+                            }
+                        )
                     }
+                }
+            }
+            item {
+                when (manualRotationState) {
+                    ManualRotationUiState.Idle -> Unit
+                    ManualRotationUiState.Running -> Text(
+                        "Téléchargement / application en cours…",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    is ManualRotationUiState.Success -> Text(
+                        manualRotationState.message,
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    is ManualRotationUiState.Error -> Text(
+                        manualRotationState.message,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
             }
             item {
@@ -336,6 +469,31 @@ private fun UpdateCard(
                     Text("Installer")
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticsCard(
+    state: DiagnosticsUiState,
+    onShare: () -> Unit
+) {
+    SettingCard("Diagnostics") {
+        Text(
+            "Les logs restent sur l'appareil. L'export contient l'état du cache, WorkManager et les résultats séparés Accueil / Verrouillage.",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(Modifier.height(10.dp))
+        OutlinedButton(
+            onClick = onShare,
+            enabled = state !is DiagnosticsUiState.Exporting,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (state is DiagnosticsUiState.Exporting) "Préparation…" else "Partager les diagnostics")
+        }
+        if (state is DiagnosticsUiState.Error) {
+            Spacer(Modifier.height(8.dp))
+            Text(state.message, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
     }
 }

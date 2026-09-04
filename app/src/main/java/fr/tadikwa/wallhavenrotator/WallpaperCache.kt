@@ -12,6 +12,11 @@ class WallpaperCache(private val context: Context) {
     fun peek(poolKey: String, profile: ProfileSettings, orientation: ResolvedOrientation): CachedWallpaper? {
         var queue = loadQueue(poolKey).filter { fileFor(poolKey, it.fileName).isFile }
         if (queue.isEmpty()) {
+            Diagnostics.log(
+                context,
+                "cache.miss",
+                fields = mapOf("pool" to poolKey, "orientation" to orientation.name)
+            )
             refill(poolKey, profile, orientation)
             queue = loadQueue(poolKey).filter { fileFor(poolKey, it.fileName).isFile }
         }
@@ -37,6 +42,7 @@ class WallpaperCache(private val context: Context) {
         val existing = loadQueue(poolKey).filter { fileFor(poolKey, it.fileName).isFile }.toMutableList()
         if (existing.size >= PoolPolicy.TARGET_SIZE) return
 
+        val initialCount = existing.size
         val history = loadHistory().toMutableSet()
         val queuedIds = loadAllQueuedIds().toMutableSet()
         val pageKey = "page_$poolKey"
@@ -44,7 +50,21 @@ class WallpaperCache(private val context: Context) {
         var page = prefs.getInt(pageKey, 1).coerceAtLeast(1)
         var seed = prefs.getString(seedKey, null)
         var attempts = 0
+        var downloadFailures = 0
         var lastFailure: Throwable? = null
+
+        Diagnostics.log(
+            context,
+            "cache.refill.start",
+            fields = mapOf(
+                "pool" to poolKey,
+                "existing" to existing.size,
+                "source" to profile.source.name,
+                "category" to profile.category.name,
+                "orientation" to orientation.name,
+                "page" to page
+            )
+        )
 
         // One page normally fills a pool. Extra pages are used only when history or
         // another active pool already owns many results, keeping API usage bounded.
@@ -53,10 +73,28 @@ class WallpaperCache(private val context: Context) {
                 client.search(profile, orientation, page = page, seed = seed)
             } catch (failure: Throwable) {
                 lastFailure = failure
+                Diagnostics.log(
+                    context,
+                    "cache.search.failure",
+                    level = "ERROR",
+                    fields = mapOf("pool" to poolKey, "page" to page),
+                    throwable = failure
+                )
                 break
             }
             attempts += 1
             if (profile.source == SourceMode.RANDOM && seed.isNullOrBlank()) seed = result.seed
+
+            Diagnostics.log(
+                context,
+                "cache.search.success",
+                fields = mapOf(
+                    "pool" to poolKey,
+                    "page" to page,
+                    "items" to result.items.size,
+                    "lastPage" to result.lastPage
+                )
+            )
 
             for (item in result.items) {
                 if (existing.size >= PoolPolicy.TARGET_SIZE) break
@@ -70,8 +108,17 @@ class WallpaperCache(private val context: Context) {
                     client.download(item, destination)
                     existing += CachedWallpaper(item.id, fileName)
                     queuedIds += item.id
-                }.onFailure {
+                }.onFailure { failure ->
                     destination.delete()
+                    downloadFailures += 1
+                    lastFailure = failure
+                    Diagnostics.log(
+                        context,
+                        "cache.download.failure",
+                        level = "WARN",
+                        fields = mapOf("pool" to poolKey, "wallhavenId" to item.id),
+                        throwable = failure
+                    )
                 }
             }
             saveQueue(poolKey, existing)
@@ -91,7 +138,24 @@ class WallpaperCache(private val context: Context) {
             .putString(seedKey, seed)
             .apply()
 
-        if (existing.isEmpty() && lastFailure != null) throw lastFailure
+        Diagnostics.log(
+            context,
+            "cache.refill.finish",
+            level = if (existing.isEmpty()) "WARN" else "INFO",
+            fields = mapOf(
+                "pool" to poolKey,
+                "before" to initialCount,
+                "after" to existing.size,
+                "attempts" to attempts,
+                "downloadFailures" to downloadFailures
+            )
+        )
+
+        if (existing.isEmpty()) {
+            val failure = lastFailure
+            if (failure != null) throw failure
+            error("Wallhaven n'a renvoyé aucun wallpaper utilisable pour ce profil")
+        }
     }
 
     fun pruneToSettings(settings: AppSettings) {

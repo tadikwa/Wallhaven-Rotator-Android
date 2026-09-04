@@ -8,18 +8,91 @@ import java.io.File
 import kotlin.math.max
 import kotlin.math.roundToInt
 
+data class WallpaperApplyResult(
+    val destination: String,
+    val returnedId: Int,
+    val beforeId: Int,
+    val afterId: Int
+)
+
 object WallpaperApplier {
-    fun apply(context: Context, file: File, which: Int, orientation: ResolvedOrientation) {
+    fun apply(
+        context: Context,
+        file: File,
+        which: Int,
+        orientation: ResolvedOrientation
+    ): WallpaperApplyResult {
+        val manager = WallpaperManager.getInstance(context)
+        val destination = destinationLabel(which)
+        val beforeId = runCatching { manager.getWallpaperId(which) }.getOrDefault(-1)
+
+        Diagnostics.log(
+            context,
+            "wallpaper.apply.start",
+            fields = mapOf(
+                "destination" to destination,
+                "file" to file.name,
+                "bytes" to file.length(),
+                "orientation" to orientation.name,
+                "beforeId" to beforeId,
+                "wallpaperSupported" to runCatching { manager.isWallpaperSupported() }.getOrDefault(false),
+                "setWallpaperAllowed" to runCatching { manager.isSetWallpaperAllowed() }.getOrDefault(false)
+            )
+        )
+
+        if (!manager.isWallpaperSupported()) {
+            error("Android indique que les fonds d'écran ne sont pas pris en charge sur cet appareil")
+        }
+        if (!manager.isSetWallpaperAllowed()) {
+            error("Android interdit actuellement à l'application de modifier le fond d'écran")
+        }
+
         val (targetWidth, targetHeight) = targetSize(context, orientation)
         val bitmap = decodeSampled(file, targetWidth * 2, targetHeight * 2)
             ?: error("Impossible de décoder ${file.name}")
         val cropped = centerCrop(bitmap, targetWidth, targetHeight)
         if (cropped !== bitmap) bitmap.recycle()
+
         try {
-            WallpaperManager.getInstance(context).setBitmap(cropped, null, false, which)
+            val returnedId = manager.setBitmap(cropped, null, false, which)
+            val afterId = runCatching { manager.getWallpaperId(which) }.getOrDefault(-1)
+            if (returnedId <= 0) {
+                error("WallpaperManager a refusé le fond d'écran $destination (ID retourné : $returnedId)")
+            }
+            Diagnostics.log(
+                context,
+                "wallpaper.apply.success",
+                fields = mapOf(
+                    "destination" to destination,
+                    "returnedId" to returnedId,
+                    "beforeId" to beforeId,
+                    "afterId" to afterId,
+                    "width" to targetWidth,
+                    "height" to targetHeight
+                )
+            )
+            return WallpaperApplyResult(destination, returnedId, beforeId, afterId)
+        } catch (failure: Throwable) {
+            Diagnostics.log(
+                context,
+                "wallpaper.apply.failure",
+                level = "ERROR",
+                fields = mapOf(
+                    "destination" to destination,
+                    "beforeId" to beforeId
+                ),
+                throwable = failure
+            )
+            throw failure
         } finally {
             cropped.recycle()
         }
+    }
+
+    private fun destinationLabel(which: Int): String = when (which) {
+        WallpaperManager.FLAG_SYSTEM -> "home"
+        WallpaperManager.FLAG_LOCK -> "lock"
+        else -> "unknown:$which"
     }
 
     private fun targetSize(context: Context, orientation: ResolvedOrientation): Pair<Int, Int> {
