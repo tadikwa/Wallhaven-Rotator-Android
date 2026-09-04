@@ -77,16 +77,18 @@ class WallpaperCache(private val context: Context) {
         poolKey: String,
         profile: ProfileSettings,
         orientation: ResolvedOrientation,
-        targetSize: Int = PoolPolicy.TARGET_SIZE
+        targetSize: Int = PoolPolicy.TARGET_SIZE,
+        shouldStop: () -> Boolean = { false }
     ) = synchronized(CACHE_LOCK) {
-        refillLocked(poolKey, profile, orientation, targetSize)
+        refillLocked(poolKey, profile, orientation, targetSize, shouldStop)
     }
 
     private fun refillLocked(
         poolKey: String,
         profile: ProfileSettings,
         orientation: ResolvedOrientation,
-        targetSize: Int
+        targetSize: Int,
+        shouldStop: () -> Boolean
     ) {
         val requestedTarget = targetSize.coerceIn(1, PoolPolicy.TARGET_SIZE)
         val existing = loadQueue(poolKey).filter { fileFor(poolKey, it.fileName).isFile }.toMutableList()
@@ -108,7 +110,22 @@ class WallpaperCache(private val context: Context) {
         var broadSearchFallbacks = 0
         var lastFailure: Throwable? = null
         var abortRefill = false
+        var stoppedEarly = false
         var diskBudgetReached = stats().bytes >= CachePolicy.refillStopBytes(cacheLimitMb) && existing.isNotEmpty()
+
+        fun stopRequested(): Boolean {
+            if (!stoppedEarly && shouldStop()) stoppedEarly = true
+            return stoppedEarly
+        }
+
+        if (stopRequested()) {
+            Diagnostics.log(
+                context,
+                "cache.refill.interrupted",
+                fields = mapOf("pool" to poolKey, "phase" to "before_start")
+            )
+            return
+        }
 
         Diagnostics.log(
             context,
@@ -133,7 +150,8 @@ class WallpaperCache(private val context: Context) {
             existing.size < requestedTarget &&
             attempts < PoolPolicy.MAX_SEARCH_PAGES_PER_REFILL &&
             !diskBudgetReached &&
-            !abortRefill
+            !abortRefill &&
+            !stopRequested()
         ) {
             var result = try {
                 client.search(profile, orientation, page = page, seed = seed)
@@ -192,6 +210,7 @@ class WallpaperCache(private val context: Context) {
                 broadSearchFallbacks += 1
             }
 
+            if (stopRequested()) break
             if (profile.source == SourceMode.RANDOM && seed.isNullOrBlank()) seed = result.seed
 
             Diagnostics.log(
@@ -207,6 +226,7 @@ class WallpaperCache(private val context: Context) {
             )
 
             for (item in result.items) {
+                if (stopRequested()) break
                 if (existing.size >= requestedTarget) break
                 if (item.id in history || item.id in queuedIds) continue
 
@@ -246,6 +266,7 @@ class WallpaperCache(private val context: Context) {
                         )
                         if (abortRefill) break else continue
                     }
+                    if (stopRequested()) break
                     val blocked = ContentFilterPolicy.blockedTags(tags, profile.contentFilter)
                     Diagnostics.log(
                         context,
@@ -265,12 +286,17 @@ class WallpaperCache(private val context: Context) {
                     }
                 }
 
+                if (stopRequested()) break
                 val extension = item.path.substringAfterLast('.', "jpg").substringBefore('?').lowercase()
                     .takeIf { it in setOf("jpg", "jpeg", "png", "webp") } ?: "jpg"
                 val fileName = "${item.id}.$extension"
                 val destination = fileFor(poolKey, fileName)
                 runCatching {
                     client.download(item, destination)
+                    if (stopRequested()) {
+                        destination.delete()
+                        return@runCatching
+                    }
                     val hardLimitBytes = CachePolicy.limitBytes(cacheLimitMb)
                     if (destination.length() > hardLimitBytes) {
                         destination.delete()
@@ -305,10 +331,11 @@ class WallpaperCache(private val context: Context) {
                         throwable = failure
                     )
                 }
-                if (diskBudgetReached || abortRefill) break
+                if (diskBudgetReached || abortRefill || stopRequested()) break
             }
             saveQueue(poolKey, existing)
 
+            if (stopRequested()) break
             val lastPage = result.lastPage.coerceAtLeast(1)
             page += 1
             if (page > lastPage || page > 20) {
@@ -316,7 +343,7 @@ class WallpaperCache(private val context: Context) {
                 if (profile.source == SourceMode.RANDOM) seed = null
                 break
             }
-            if (diskBudgetReached || abortRefill || metadataLimitReached || result.items.isEmpty()) break
+            if (diskBudgetReached || abortRefill || metadataLimitReached || stopRequested() || result.items.isEmpty()) break
         }
 
         prefs.edit()
@@ -344,9 +371,24 @@ class WallpaperCache(private val context: Context) {
                 "broadSearchFallbacks" to broadSearchFallbacks,
                 "diskBudgetReached" to diskBudgetReached,
                 "networkAbort" to abortRefill,
+                "stoppedEarly" to stoppedEarly,
                 "cacheBytes" to stats().bytes
             )
         )
+
+        if (stoppedEarly) {
+            Diagnostics.log(
+                context,
+                "cache.refill.interrupted",
+                fields = mapOf(
+                    "pool" to poolKey,
+                    "before" to initialCount,
+                    "after" to finalQueue.size,
+                    "metadataChecks" to metadataChecks
+                )
+            )
+            return
+        }
 
         if (finalQueue.isEmpty()) {
             val failure = lastFailure

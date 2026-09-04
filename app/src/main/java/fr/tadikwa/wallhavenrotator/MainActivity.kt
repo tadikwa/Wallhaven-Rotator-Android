@@ -174,6 +174,11 @@ class MainActivity : ComponentActivity() {
                             val snapshot = settings
                             repository.save(snapshot)
                             manualRotationState = ManualRotationUiState.Running
+
+                            // Manual changes take priority over background cache warming.
+                            // Stop the current preload cooperatively so a cache miss cannot
+                            // make the button wait behind dozens of metadata/download calls.
+                            RotationScheduler.requestManualPriority(context)
                             Diagnostics.log(
                                 context,
                                 "manual_rotation.requested",
@@ -182,6 +187,11 @@ class MainActivity : ComponentActivity() {
                             thread(name = "wallhaven-manual-rotation") {
                                 val result = runCatching {
                                     RotationEngine.rotateOnce(context.applicationContext, snapshot)
+                                }
+                                if (snapshot.enabled) {
+                                    // The interrupted preload is intentionally replaced only
+                                    // after the visible manual rotation has had first priority.
+                                    RotationScheduler.preload(context.applicationContext)
                                 }
                                 runOnUiThread {
                                     if (!isDestroyed && !isFinishing) {

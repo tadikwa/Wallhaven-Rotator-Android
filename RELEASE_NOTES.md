@@ -1,14 +1,15 @@
-## 0.1.0-alpha.8
+## 0.1.0-alpha.9
 
-Strict-content filtering hardening before persistent signing / real OTA.
+Background execution and manual-priority reliability pass.
 
-- Bump the content-filter policy version so older, looser cached pools are discarded automatically.
-- Keep **Reduced** compatible with ordinary women/anime subjects while blocking explicit adult/suggestive metadata such as `pornstar`, `Tushy`, nudity/erotic/fetish terms, `ass`/`butt` and related high-signal tags.
-- Make **Strict** deliberately conservative: in addition to adult/suggestive metadata it rejects female-focused tags (`women`, `girls`, `anime girls`, `video game girls`, `actress`, etc.), even when Wallhaven does not provide an explicit sexual tag.
-- Keep non-female anime (for example `anime boys`) and scenery/abstract subjects eligible in Strict.
-- Increase the metadata-inspection budget from 12 to 16 candidates per refill to compensate for the stricter local rejection rate.
-- If Wallhaven returns zero results because query-side negative terms make a narrow listing collapse, retry the same SFW listing without the automatic negatives and enforce Reduced/Strict locally from detailed wallpaper tags.
-- Improve diagnostics with explicit broad-search fallback counters and the exact tag labels that caused rejection.
-- No changes to Home/Lock compatibility, independent wallpaper selection, scheduling, cache limits, settings keys or OTA state.
+- Keep WorkManager as the background rotation engine; the UI does not need to stay focused
+- Reset periodic cadence on Save with `CANCEL_AND_REENQUEUE`, with the first automatic change after the full selected interval
+- Preload active destinations in two phases: first guarantee one ready image per destination, then fill reserves to eight
+- Give **Change now** priority over cache warming by cooperatively interrupting an active preload
+- Cancel the current unique preload on manual priority and resume a fresh preload after the visible manual rotation
+- Add cooperative stop checks between Wallhaven search, metadata inspection and image downloads
+- Add `CONNECTED` network constraint to background preloads while keeping wallpaper rotation itself cache-capable offline
+- Add scheduler/preload diagnostics for cadence, warm completion and manual-priority interruption
+- Preserve the alpha.8 Strict content policy, independent HONOR Home/Lock compatibility path, bounded cache and settings persistence
 
-Strict remains metadata-driven rather than image-recognition-driven. It intentionally favours false positives over allowing female-focused wallpapers when the user selects the conservative Strict mode.
+WorkManager's 15-minute value remains a minimum requested cadence. Android may defer execution because of Doze, battery policy or vendor scheduling, but the application UI/process does not need to be in the foreground.
