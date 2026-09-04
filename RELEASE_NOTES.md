@@ -1,16 +1,17 @@
-## 0.1.0-alpha.3
+## 0.1.0-alpha.4
 
-Validation update focused on content filtering and bounded storage use.
+Reliability fix based on exported on-device diagnostics.
 
-- Per-profile suggestive-content modes: Standard, Reduced and Strict
-- Tag-based exclusion policy that keeps Anime available instead of requiring `-anime`
-- Content-filter changes invalidate the affected cache pool automatically
-- Global wallpaper-cache cap: 100 / 250 / 500 MiB, with 250 MiB default
-- Automatic cleanup of inactive pools, missing queue entries and orphan files
-- Cache enforcement during refills so storage cannot grow without bound
-- Refill stops near the configured disk budget to avoid download/eviction churn
-- Cache size shown in the UI and a manual **Clear cache** action
-- Diagnostic exports now include content-filter and cache-limit settings plus cache bytes
-- Retains alpha.2 manual-rotation, separate lockscreen application and diagnostics fixes
+- Fix independent Home/Lock ordering: both destinations are prepared before application
+- Remove inline Home refill that previously delayed Lock application by tens of seconds
+- Empty pools fetch one image immediately; full replenishment runs asynchronously afterwards
+- Serialize rotations and cache mutations/refills inside the app process
+- Use a unique KEEP preload after rotations to prevent concurrent refill storms
+- Stop a refill after HTTP 429, DNS or socket failures instead of trying every remaining image
+- Automatic WorkManager failures wait for the next scheduled opportunity instead of immediate retry loops
+- Reduce ready pool from 24 to 8 images per profile, refill threshold from 6 to 2, and search-page cap from 4 to 2
+- Fix Strict suggestive-content filtering by removing undocumented multi-word brace exclusions
+- Keep Strict exclusions to Wallhaven's documented `-tagname` query syntax
+- Retain the bounded 100 / 250 / 500 MiB cache and anti-repeat history
 
-The suggestive-content filter is best-effort and depends on Wallhaven tags; it is not image recognition.
+The tag-based suggestive-content modes remain best-effort: Wallhaven tagging quality determines what can be filtered without image recognition.

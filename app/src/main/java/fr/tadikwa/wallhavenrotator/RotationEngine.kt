@@ -2,6 +2,7 @@ package fr.tadikwa.wallhavenrotator
 
 import android.app.WallpaperManager
 import android.content.Context
+import java.io.File
 
 data class RotationOutcome(
     val destinations: List<String>,
@@ -16,8 +17,16 @@ data class RotationOutcome(
 }
 
 object RotationEngine {
-    fun rotateOnce(context: Context, settings: AppSettings): RotationOutcome {
-        val appContext = context.applicationContext
+    // Manual actions and WorkManager can otherwise overlap and apply/refill the same
+    // pools at once. One in-process rotation at a time keeps destination ordering sane.
+    private val rotationLock = Any()
+
+    fun rotateOnce(context: Context, settings: AppSettings): RotationOutcome =
+        synchronized(rotationLock) {
+            rotateOnceLocked(context.applicationContext, settings)
+        }
+
+    private fun rotateOnceLocked(appContext: Context, settings: AppSettings): RotationOutcome {
         val cache = WallpaperCache(appContext)
         val orientation = DeviceProfile.resolveOrientation(appContext, settings.orientationMode)
 
@@ -35,26 +44,26 @@ object RotationEngine {
             cache.pruneToSettings(settings)
             val outcome = when (settings.targetMode) {
                 TargetMode.HOME -> {
-                    val applied = rotateOne(
-                        appContext,
+                    val prepared = prepareOne(
                         PoolKeys.home(settings.homeProfile, orientation),
                         settings.homeProfile,
                         WallpaperManager.FLAG_SYSTEM,
                         orientation,
                         cache
                     )
+                    val applied = applyPrepared(appContext, prepared, orientation, cache)
                     RotationOutcome(listOf(applied.destination), listOf(applied.wallhavenId))
                 }
 
                 TargetMode.LOCK -> {
-                    val applied = rotateOne(
-                        appContext,
+                    val prepared = prepareOne(
                         PoolKeys.lock(settings.lockProfile, orientation),
                         settings.lockProfile,
                         WallpaperManager.FLAG_LOCK,
                         orientation,
                         cache
                     )
+                    val applied = applyPrepared(appContext, prepared, orientation, cache)
                     RotationOutcome(listOf(applied.destination), listOf(applied.wallhavenId))
                 }
 
@@ -67,28 +76,36 @@ object RotationEngine {
                 )
 
                 TargetMode.BOTH_INDEPENDENT -> {
-                    val home = rotateOne(
-                        appContext,
+                    // Prepare BOTH destinations before applying either one. On an empty
+                    // cache each miss fetches just one image, so Home can no longer spend
+                    // a minute filling its pool before Lock even gets attempted.
+                    val homePrepared = prepareOne(
                         PoolKeys.home(settings.homeProfile, orientation),
                         settings.homeProfile,
                         WallpaperManager.FLAG_SYSTEM,
                         orientation,
                         cache
                     )
-                    val lock = rotateOne(
-                        appContext,
+                    val lockPrepared = prepareOne(
                         PoolKeys.lock(settings.lockProfile, orientation),
                         settings.lockProfile,
                         WallpaperManager.FLAG_LOCK,
                         orientation,
                         cache
                     )
+
+                    val home = applyPrepared(appContext, homePrepared, orientation, cache)
+                    val lock = applyPrepared(appContext, lockPrepared, orientation, cache)
                     RotationOutcome(
                         destinations = listOf(home.destination, lock.destination),
                         wallhavenIds = listOf(home.wallhavenId, lock.wallhavenId)
                     )
                 }
             }
+
+            // Never refill inline between Home and Lock. Replenishment is a unique,
+            // asynchronous WorkManager job and cannot block the visible rotation.
+            RotationScheduler.preloadIfNeeded(appContext)
 
             Diagnostics.log(
                 appContext,
@@ -117,35 +134,44 @@ object RotationEngine {
         }
     }
 
+    private data class Prepared(
+        val poolKey: String,
+        val flag: Int,
+        val wallpaper: CachedWallpaper,
+        val file: File
+    )
+
     private data class Applied(
         val destination: String,
         val wallhavenId: String
     )
 
-    private fun rotateOne(
-        context: Context,
+    private fun prepareOne(
         poolKey: String,
         profile: ProfileSettings,
         flag: Int,
         orientation: ResolvedOrientation,
         cache: WallpaperCache
-    ): Applied {
+    ): Prepared {
         val wallpaper = cache.peek(poolKey, profile, orientation)
             ?: error("Cache vide et aucun wallpaper récupérable")
-        val file = cache.fileFor(poolKey, wallpaper.fileName)
-        val applyResult = WallpaperApplier.apply(context, file, flag, orientation)
-        cache.consume(poolKey, wallpaper)
-        runCatching { cache.refillIfNeeded(poolKey, profile, orientation) }
-            .onFailure { failure ->
-                Diagnostics.log(
-                    context,
-                    "cache.refill.background_failure",
-                    level = "WARN",
-                    fields = mapOf("pool" to poolKey),
-                    throwable = failure
-                )
-            }
-        return Applied(applyResult.destination, wallpaper.id)
+        return Prepared(
+            poolKey = poolKey,
+            flag = flag,
+            wallpaper = wallpaper,
+            file = cache.fileFor(poolKey, wallpaper.fileName)
+        )
+    }
+
+    private fun applyPrepared(
+        context: Context,
+        prepared: Prepared,
+        orientation: ResolvedOrientation,
+        cache: WallpaperCache
+    ): Applied {
+        val applyResult = WallpaperApplier.apply(context, prepared.file, prepared.flag, orientation)
+        cache.consume(prepared.poolKey, prepared.wallpaper)
+        return Applied(applyResult.destination, prepared.wallpaper.id)
     }
 
     private fun rotateSameOnBoth(
@@ -166,16 +192,6 @@ object RotationEngine {
         val lock = WallpaperApplier.apply(context, file, WallpaperManager.FLAG_LOCK, orientation)
 
         cache.consume(poolKey, wallpaper)
-        runCatching { cache.refillIfNeeded(poolKey, profile, orientation) }
-            .onFailure { failure ->
-                Diagnostics.log(
-                    context,
-                    "cache.refill.background_failure",
-                    level = "WARN",
-                    fields = mapOf("pool" to poolKey),
-                    throwable = failure
-                )
-            }
 
         return RotationOutcome(
             destinations = listOf(home.destination, lock.destination),

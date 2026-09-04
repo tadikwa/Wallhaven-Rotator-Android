@@ -21,14 +21,16 @@ class RotationWorker(appContext: Context, params: WorkerParameters) : Worker(app
             )
             Result.success()
         } catch (failure: Throwable) {
+            // A periodic rotation already has a future cadence. Immediate WorkManager
+            // retries caused request bursts when the network or Wallhaven was unhappy.
             Diagnostics.log(
                 applicationContext,
-                "worker.rotation.retry",
+                "worker.rotation.failure",
                 level = "ERROR",
                 fields = mapOf("attempt" to runAttemptCount),
                 throwable = failure
             )
-            Result.retry()
+            Result.success()
         }
     }
 }
@@ -65,14 +67,16 @@ class PreloadWorker(appContext: Context, params: WorkerParameters) : Worker(appC
             )
             Result.success()
         } catch (failure: Throwable) {
+            // Do not create an automatic retry storm. A later save/rotation will enqueue
+            // another preload; manual rotation can still fetch one image on demand.
             Diagnostics.log(
                 applicationContext,
-                "worker.preload.retry",
+                "worker.preload.failure",
                 level = "ERROR",
                 fields = mapOf("attempt" to runAttemptCount),
                 throwable = failure
             )
-            Result.retry()
+            Result.success()
         }
     }
 }

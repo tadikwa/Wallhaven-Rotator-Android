@@ -6,6 +6,10 @@ import org.json.JSONObject
 import java.io.File
 
 class WallpaperCache(private val context: Context) {
+    private companion object {
+        val CACHE_LOCK = Any()
+    }
+
     private val prefs = context.getSharedPreferences("wallhaven_cache", Context.MODE_PRIVATE)
     private val client = WallhavenClient()
 
@@ -17,13 +21,13 @@ class WallpaperCache(private val context: Context) {
                 "cache.miss",
                 fields = mapOf("pool" to poolKey, "orientation" to orientation.name)
             )
-            refill(poolKey, profile, orientation)
+            refill(poolKey, profile, orientation, PoolPolicy.CACHE_MISS_TARGET_SIZE)
             queue = loadQueue(poolKey).filter { fileFor(poolKey, it.fileName).isFile }
         }
         return queue.firstOrNull()
     }
 
-    fun consume(poolKey: String, wallpaper: CachedWallpaper) {
+    fun consume(poolKey: String, wallpaper: CachedWallpaper) = synchronized(CACHE_LOCK) {
         val queue = loadQueue(poolKey).filterNot { it.id == wallpaper.id && it.fileName == wallpaper.fileName }
         saveQueue(poolKey, queue)
         addHistory(wallpaper.id)
@@ -42,8 +46,7 @@ class WallpaperCache(private val context: Context) {
         return CacheStats(files = files.size, bytes = files.sumOf { it.length() })
     }
 
-    @Synchronized
-    fun clearAll(): CacheStats {
+    fun clearAll(): CacheStats = synchronized(CACHE_LOCK) {
         val before = stats()
         val root = rootDir()
         root.deleteRecursively()
@@ -62,19 +65,32 @@ class WallpaperCache(private val context: Context) {
             "cache.clear",
             fields = mapOf("filesBefore" to before.files, "bytesBefore" to before.bytes)
         )
-        return stats()
+        stats()
     }
 
-    @Synchronized
-    fun maintenance(settings: AppSettings): CacheStats {
-        pruneToSettings(settings)
-        return stats()
+    fun maintenance(settings: AppSettings): CacheStats = synchronized(CACHE_LOCK) {
+        pruneToSettingsLocked(settings)
+        stats()
     }
 
-    @Synchronized
-    fun refill(poolKey: String, profile: ProfileSettings, orientation: ResolvedOrientation) {
+    fun refill(
+        poolKey: String,
+        profile: ProfileSettings,
+        orientation: ResolvedOrientation,
+        targetSize: Int = PoolPolicy.TARGET_SIZE
+    ) = synchronized(CACHE_LOCK) {
+        refillLocked(poolKey, profile, orientation, targetSize)
+    }
+
+    private fun refillLocked(
+        poolKey: String,
+        profile: ProfileSettings,
+        orientation: ResolvedOrientation,
+        targetSize: Int
+    ) {
+        val requestedTarget = targetSize.coerceIn(1, PoolPolicy.TARGET_SIZE)
         val existing = loadQueue(poolKey).filter { fileFor(poolKey, it.fileName).isFile }.toMutableList()
-        if (existing.size >= PoolPolicy.TARGET_SIZE) return
+        if (existing.size >= requestedTarget) return
 
         val initialCount = existing.size
         val history = loadHistory().toMutableSet()
@@ -87,6 +103,7 @@ class WallpaperCache(private val context: Context) {
         var attempts = 0
         var downloadFailures = 0
         var lastFailure: Throwable? = null
+        var abortRefill = false
         var diskBudgetReached = stats().bytes >= CachePolicy.refillStopBytes(cacheLimitMb) && existing.isNotEmpty()
 
         Diagnostics.log(
@@ -100,21 +117,25 @@ class WallpaperCache(private val context: Context) {
                 "contentFilter" to profile.contentFilter.name,
                 "orientation" to orientation.name,
                 "page" to page,
-                "limitMb" to cacheLimitMb
+                "limitMb" to cacheLimitMb,
+                "targetSize" to requestedTarget,
+                "effectiveQuery" to ContentFilterPolicy.compose(profile.query, profile.contentFilter).take(512)
             )
         )
 
         // One page normally fills a pool. Extra pages are used only when history or
         // another active pool already owns many results, keeping API usage bounded.
         while (
-            existing.size < PoolPolicy.TARGET_SIZE &&
+            existing.size < requestedTarget &&
             attempts < PoolPolicy.MAX_SEARCH_PAGES_PER_REFILL &&
-            !diskBudgetReached
+            !diskBudgetReached &&
+            !abortRefill
         ) {
             val result = try {
                 client.search(profile, orientation, page = page, seed = seed)
             } catch (failure: Throwable) {
                 lastFailure = failure
+                abortRefill = shouldAbortRefill(failure)
                 Diagnostics.log(
                     context,
                     "cache.search.failure",
@@ -139,7 +160,7 @@ class WallpaperCache(private val context: Context) {
             )
 
             for (item in result.items) {
-                if (existing.size >= PoolPolicy.TARGET_SIZE) break
+                if (existing.size >= requestedTarget) break
                 if (item.id in history || item.id in queuedIds) continue
 
                 val extension = item.path.substringAfterLast('.', "jpg").substringBefore('?').lowercase()
@@ -171,6 +192,9 @@ class WallpaperCache(private val context: Context) {
                     saveQueue(poolKey, existing)
                     downloadFailures += 1
                     lastFailure = failure
+                    if (shouldAbortRefill(failure)) {
+                        abortRefill = true
+                    }
                     Diagnostics.log(
                         context,
                         "cache.download.failure",
@@ -179,7 +203,7 @@ class WallpaperCache(private val context: Context) {
                         throwable = failure
                     )
                 }
-                if (diskBudgetReached) break
+                if (diskBudgetReached || abortRefill) break
             }
             saveQueue(poolKey, existing)
 
@@ -190,7 +214,7 @@ class WallpaperCache(private val context: Context) {
                 if (profile.source == SourceMode.RANDOM) seed = null
                 break
             }
-            if (diskBudgetReached || result.items.isEmpty()) break
+            if (diskBudgetReached || abortRefill || result.items.isEmpty()) break
         }
 
         prefs.edit()
@@ -213,6 +237,7 @@ class WallpaperCache(private val context: Context) {
                 "attempts" to attempts,
                 "downloadFailures" to downloadFailures,
                 "diskBudgetReached" to diskBudgetReached,
+                "networkAbort" to abortRefill,
                 "cacheBytes" to stats().bytes
             )
         )
@@ -224,8 +249,11 @@ class WallpaperCache(private val context: Context) {
         }
     }
 
-    @Synchronized
-    fun pruneToSettings(settings: AppSettings) {
+    fun pruneToSettings(settings: AppSettings) = synchronized(CACHE_LOCK) {
+        pruneToSettingsLocked(settings)
+    }
+
+    private fun pruneToSettingsLocked(settings: AppSettings) {
         val active = PoolKeys.active(settings)
         rootDir().listFiles()?.filter { it.isDirectory && it.name !in active }?.forEach { it.deleteRecursively() }
 
@@ -382,6 +410,14 @@ class WallpaperCache(private val context: Context) {
         val arr = JSONArray()
         history.forEach(arr::put)
         prefs.edit().putString("history", arr.toString()).apply()
+    }
+
+    private fun shouldAbortRefill(failure: Throwable): Boolean {
+        val message = failure.message.orEmpty()
+        return message.startsWith("HTTP 429") ||
+            failure is java.net.UnknownHostException ||
+            failure is java.net.SocketException ||
+            failure is java.net.SocketTimeoutException
     }
 
     private fun sanitize(value: String): String = value.replace(Regex("[^A-Za-z0-9_.-]"), "_")

@@ -25,10 +25,13 @@ class ContentFilterPolicyTest {
     }
 
     @Test
-    fun strictAddsMultiWordExclusionsWithBraces() {
+    fun strictUsesOnlyDocumentedSingleTokenExclusions() {
         val query = ContentFilterPolicy.compose("", ContentFilterMode.STRICT)
-        assertTrue(query.contains("-{fishnet stockings}"))
-        assertTrue(query.contains("-{one-piece swimsuit}"))
+        assertTrue(query.contains("-fishnet"))
+        assertTrue(query.contains("-garter"))
+        assertTrue(query.contains("-boobs"))
+        assertFalse(query.contains("{"))
+        assertFalse(query.contains("}"))
     }
 
     @Test

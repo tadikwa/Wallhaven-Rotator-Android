@@ -24,10 +24,21 @@ object RotationScheduler {
         manager.enqueueUniquePeriodicWork(PERIODIC_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
     }
 
+    // Explicit settings changes should restart the preload against the new pools.
     fun preload(context: Context) {
         WorkManager.getInstance(context).enqueueUniqueWork(
             PRELOAD_NAME,
             ExistingWorkPolicy.REPLACE,
+            OneTimeWorkRequestBuilder<PreloadWorker>().build()
+        )
+    }
+
+    // Rotation completion only needs to ensure that one refill exists. KEEP avoids
+    // cancelling/restarting an already-running preload and prevents refill storms.
+    fun preloadIfNeeded(context: Context) {
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            PRELOAD_NAME,
+            ExistingWorkPolicy.KEEP,
             OneTimeWorkRequestBuilder<PreloadWorker>().build()
         )
     }

@@ -15,23 +15,27 @@ object ContentFilterPolicy {
         "ecchi"
     )
 
+    // Wallhaven documents -tagname exclusions. Keep the built-in blacklist to
+    // single-token terms only: the previous experimental -{multi word} syntax
+    // was not documented and could collapse a Strict search to zero results.
     private val strictExtraTags = listOf(
         "thong",
         "stockings",
-        "fishnet stockings",
-        "bikini top",
-        "one-piece swimsuit",
-        "sports bra",
-        "garter belt",
+        "fishnet",
+        "garter",
         "boobs",
-        "big boobs",
-        "sexy"
+        "breasts",
+        "sexy",
+        "seductive",
+        "pinup",
+        "thighhighs",
+        "miniskirt"
     )
 
     fun description(mode: ContentFilterMode): String = when (mode) {
         ContentFilterMode.STANDARD -> "SFW Wallhaven uniquement, sans exclusion supplémentaire."
         ContentFilterMode.REDUCED -> "Exclut les principaux tags associés aux sous-vêtements, maillots et cadrages sexualisés."
-        ContentFilterMode.STRICT -> "Liste d'exclusion plus large. Peut retirer davantage d'images parfaitement SFW."
+        ContentFilterMode.STRICT -> "Exclusions SFW plus larges, avec uniquement la syntaxe de tags documentée par Wallhaven."
     }
 
     fun compose(userQuery: String, mode: ContentFilterMode): String {
@@ -49,10 +53,7 @@ object ContentFilterPolicy {
         }
         return buildList {
             normalizedUserQuery.takeIf { it.isNotEmpty() }?.let(::add)
-            tags.mapTo(this) { excludeToken(it) }
+            tags.mapTo(this) { "-$it" }
         }.joinToString(" ")
     }
-
-    private fun excludeToken(tag: String): String =
-        if (tag.any(Char::isWhitespace)) "-{$tag}" else "-$tag"
 }
