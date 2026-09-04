@@ -4,9 +4,15 @@ Android companion to **Wallhaven Rotator**, built around the public SFW Wallhave
 
 > This project is not affiliated with or endorsed by Wallhaven.
 
-## Initial alpha
+## Screenshots
 
-The `0.1.0-alpha.1` prerelease provides a functional first implementation:
+<p align="center">
+  <img src="assets/screenshots/android-overview-top.png" width="320" alt="Wallhaven Rotator Android — rotation, destination and orientation settings" />
+  &nbsp;&nbsp;
+  <img src="assets/screenshots/android-overview-settings.png" width="320" alt="Wallhaven Rotator Android — Wallhaven profile, cache and actions" />
+</p>
+
+## Features
 
 - Android 7.0+ (`minSdk 24`)
 - Home screen, lock screen, same image on both, or independent home/lock profiles
@@ -32,6 +38,7 @@ The `0.1.0-alpha.1` prerelease provides a functional first implementation:
 - WorkManager periodic rotation at 15 min, 30 min, 1 h, 3 h, 6 h, 12 h or 24 h
 - Manual "Change now"
 - Center-crop and downsample before applying the wallpaper to limit memory pressure
+- GitHub Releases OTA update support with SHA-256, package and signing-certificate validation
 - No telemetry, analytics, ads or tracking endpoint
 
 ## Home / lock behavior
@@ -43,6 +50,23 @@ Android's `WallpaperManager` is used with `FLAG_SYSTEM` and `FLAG_LOCK` (API 24+
 Wallhaven search listings return up to 24 results per page. The app therefore uses a 24-item target pool. At a 15-minute rotation interval, one full pool represents roughly six hours of rotations per active profile. Refill is triggered only when the pool reaches six items or fewer. One API page normally fills a pool; additional pages are queried only when history or another active pool already owns too many of the returned IDs, with a hard cap of four search pages per refill.
 
 Images are downloaded into app-private storage. Once an image is successfully applied it is removed from the queue and its Wallhaven ID enters the anti-repeat history.
+
+## OTA updates
+
+The application can check this repository's GitHub Releases and install a newer APK without sending project telemetry.
+
+- automatic checks are limited to at most once every 24 hours;
+- a manual **Check** action is available in the app;
+- stable installations only follow stable releases;
+- prerelease installations may follow prereleases and later stable releases;
+- every OTA-capable release includes `Wallhaven-Rotator-Android-update.json`;
+- the downloaded APK is checked against the manifest SHA-256;
+- application ID, `versionCode` and signing certificate are verified before installation;
+- Android's package installer remains in control of the final installation confirmation.
+
+On Android 8.0+, the user may need to grant Wallhaven Rotator permission to **Install unknown apps** before the first OTA installation.
+
+The first published alpha (`0.1.0-alpha.1`) is CI debug-signed. It cannot be upgraded in place to the first persistently signed build. Uninstall that test alpha once before installing the first real signed release; subsequent versions can then use OTA normally with the same signing key.
 
 ## Android scheduling caveat
 
@@ -65,11 +89,29 @@ Build locally with a compatible Android SDK:
 gradle :app:testDebugUnitTest :app:assembleDebug
 ```
 
-The included GitHub Actions workflow installs the required Android SDK packages and builds the prerelease APK from source.
+The regular GitHub Actions workflow runs tests and builds a debug validation APK from source on `main`.
+
+## Signed releases
+
+Real releases use a separate workflow and a persistent Android signing key. The workflow:
+
+1. restores the keystore from GitHub Actions secrets into the ephemeral runner;
+2. runs release unit tests and builds the signed APK;
+3. verifies the APK signature with `apksigner`;
+4. generates the SHA-256 checksum and OTA manifest;
+5. creates the GitHub Release with the APK and OTA metadata.
+
+See [SIGNING.md](SIGNING.md) before publishing the first real release and [RELEASING.md](RELEASING.md) for the release checklist.
 
 ## Privacy
 
-Wallhaven Rotator Android contacts Wallhaven only to search for and download wallpapers. GitHub is used only by the repository/build/release workflow. The application contains no project telemetry.
+Wallhaven Rotator Android contacts Wallhaven for wallpaper functionality and GitHub Releases for update checks/downloads. There is no project telemetry, analytics or advertising.
+
+See [PRIVACY.md](PRIVACY.md).
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for OTA verification details.
 
 ## License
 

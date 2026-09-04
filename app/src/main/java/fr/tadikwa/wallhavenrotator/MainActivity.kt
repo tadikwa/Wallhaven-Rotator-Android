@@ -33,6 +33,7 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,6 +44,16 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
+private sealed interface UpdateUiState {
+    data object Idle : UpdateUiState
+    data object Checking : UpdateUiState
+    data object UpToDate : UpdateUiState
+    data object Downloading : UpdateUiState
+    data object Installing : UpdateUiState
+    data class Available(val update: UpdateInfo) : UpdateUiState
+    data class Error(val message: String) : UpdateUiState
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,10 +63,49 @@ class MainActivity : ComponentActivity() {
                 val context = LocalContext.current
                 val repository = remember { SettingsRepository(context) }
                 var settings by remember { mutableStateOf(repository.load()) }
+                var updateState by remember { mutableStateOf<UpdateUiState>(UpdateUiState.Idle) }
+
+                fun applyUpdateResult(result: UpdateCheckResult) {
+                    updateState = when (result) {
+                        UpdateCheckResult.UpToDate -> UpdateUiState.UpToDate
+                        is UpdateCheckResult.Available -> UpdateUiState.Available(result.update)
+                        is UpdateCheckResult.Failed -> UpdateUiState.Error(result.message)
+                    }
+                }
+
+                LaunchedEffect(Unit) {
+                    if (UpdateManager.shouldAutoCheck(context)) {
+                        updateState = UpdateUiState.Checking
+                        UpdateManager.checkAsync(context, manual = false, callback = ::applyUpdateResult)
+                    }
+                }
 
                 MainScreen(
                     settings = settings,
                     onSettingsChanged = { settings = it },
+                    updateState = updateState,
+                    onCheckUpdate = {
+                        updateState = UpdateUiState.Checking
+                        UpdateManager.checkAsync(context, manual = true, callback = ::applyUpdateResult)
+                    },
+                    onInstallUpdate = { update ->
+                        if (!UpdateManager.canRequestPackageInstalls(context)) {
+                            context.startActivity(UpdateManager.unknownSourcesSettingsIntent(context))
+                            Toast.makeText(
+                                context,
+                                "Autorise Wallhaven Rotator à installer ses mises à jour, puis relance l'installation.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        } else {
+                            updateState = UpdateUiState.Downloading
+                            UpdateManager.downloadAndInstallAsync(context, update) { result ->
+                                updateState = result.fold(
+                                    onSuccess = { UpdateUiState.Installing },
+                                    onFailure = { UpdateUiState.Error(it.message ?: "Échec de la mise à jour") }
+                                )
+                            }
+                        }
+                    },
                     onSave = {
                         repository.save(settings)
                         RotationScheduler.configure(context, settings)
@@ -96,6 +146,9 @@ private fun WallhavenRotatorTheme(content: @Composable () -> Unit) {
 private fun MainScreen(
     settings: AppSettings,
     onSettingsChanged: (AppSettings) -> Unit,
+    updateState: UpdateUiState,
+    onCheckUpdate: () -> Unit,
+    onInstallUpdate: (UpdateInfo) -> Unit,
     onSave: () -> Unit,
     onRotateNow: () -> Unit
 ) {
@@ -183,6 +236,14 @@ private fun MainScreen(
             }
 
             item {
+                UpdateCard(
+                    state = updateState,
+                    onCheck = onCheckUpdate,
+                    onInstall = onInstallUpdate
+                )
+            }
+
+            item {
                 SettingCard("Cache et réseau") {
                     Text(
                         "La rotation consomme d'abord le cache local. Une recharge Wallhaven n'est déclenchée que lorsque le pool tombe à ${PoolPolicy.LOW_WATERMARK} images ou moins. Chaque pool vise ${PoolPolicy.TARGET_SIZE} images.",
@@ -210,6 +271,70 @@ private fun MainScreen(
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(bottom = 24.dp)
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun UpdateCard(
+    state: UpdateUiState,
+    onCheck: () -> Unit,
+    onInstall: (UpdateInfo) -> Unit
+) {
+    SettingCard("Mises à jour") {
+        Text(
+            "Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            if (BuildConfig.VERSION_NAME.contains('-')) {
+                "Canal : préversions et versions stables"
+            } else {
+                "Canal : versions stables"
+            },
+            style = MaterialTheme.typography.bodySmall
+        )
+        Spacer(Modifier.height(10.dp))
+
+        when (state) {
+            UpdateUiState.Idle -> Text("Vérification automatique : au maximum une fois par 24 h.")
+            UpdateUiState.Checking -> Text("Vérification en cours…")
+            UpdateUiState.UpToDate -> Text("Aucune mise à jour disponible.")
+            UpdateUiState.Downloading -> Text("Téléchargement et vérification de l’APK…")
+            UpdateUiState.Installing -> Text("APK vérifié. L’installateur Android a été ouvert.")
+            is UpdateUiState.Available -> {
+                Text(
+                    "Version ${state.update.versionName} disponible.",
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    "L’APK sera contrôlé (SHA-256, package et signature) avant l’installation.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            is UpdateUiState.Error -> Text(state.message, color = MaterialTheme.colorScheme.error)
+        }
+
+        Spacer(Modifier.height(12.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            OutlinedButton(
+                onClick = onCheck,
+                enabled = state !is UpdateUiState.Checking && state !is UpdateUiState.Downloading,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Vérifier")
+            }
+            if (state is UpdateUiState.Available) {
+                Button(
+                    onClick = { onInstall(state.update) },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("Installer")
+                }
             }
         }
     }
