@@ -15,6 +15,11 @@ data class WallpaperApplyResult(
     val afterId: Int
 )
 
+data class CombinedWallpaperApplyResult(
+    val home: WallpaperApplyResult,
+    val lock: WallpaperApplyResult
+)
+
 object WallpaperApplier {
     fun apply(
         context: Context,
@@ -40,30 +45,19 @@ object WallpaperApplier {
             )
         )
 
-        if (!manager.isWallpaperSupported()) {
-            error("Android indique que les fonds d'écran ne sont pas pris en charge sur cet appareil")
-        }
-        if (!manager.isSetWallpaperAllowed()) {
-            error("Android interdit actuellement à l'application de modifier le fond d'écran")
-        }
-
-        val (targetWidth, targetHeight) = targetSize(context, orientation)
-        val bitmap = decodeSampled(file, targetWidth * 2, targetHeight * 2)
-            ?: error("Impossible de décoder ${file.name}")
-        val cropped = centerCrop(bitmap, targetWidth, targetHeight)
-        if (cropped !== bitmap) bitmap.recycle()
-
+        assertWallpaperAllowed(manager)
+        val prepared = prepareBitmap(context, file, orientation)
         val probe = WallpaperDeepDiagnostics.begin(
             context = context,
             manager = manager,
             which = which,
             destination = destination,
-            bitmap = cropped,
+            bitmap = prepared.bitmap,
             sourceFile = file
         )
 
         try {
-            val returnedId = manager.setBitmap(cropped, null, false, which)
+            val returnedId = manager.setBitmap(prepared.bitmap, null, false, which)
             if (returnedId <= 0) {
                 error("WallpaperManager a refusé le fond d'écran $destination (ID retourné : $returnedId)")
             }
@@ -78,8 +72,8 @@ object WallpaperApplier {
                     "returnedId" to returnedId,
                     "beforeId" to beforeId,
                     "afterId" to afterId,
-                    "width" to targetWidth,
-                    "height" to targetHeight
+                    "width" to prepared.width,
+                    "height" to prepared.height
                 )
             )
             return WallpaperApplyResult(destination, returnedId, beforeId, afterId)
@@ -88,16 +82,130 @@ object WallpaperApplier {
                 context,
                 "wallpaper.apply.failure",
                 level = "ERROR",
-                fields = mapOf(
-                    "destination" to destination,
-                    "beforeId" to beforeId
-                ),
+                fields = mapOf("destination" to destination, "beforeId" to beforeId),
                 throwable = failure
             )
             throw failure
         } finally {
             WallpaperDeepDiagnostics.end(probe)
-            cropped.recycle()
+            prepared.bitmap.recycle()
+        }
+    }
+
+    /**
+     * Compatibility experiment for OEM lock screens that acknowledge FLAG_LOCK but
+     * do not visibly refresh. This reproduces the original combined Android call:
+     * the lock candidate is submitted to SYSTEM|LOCK in one setBitmap invocation.
+     * RotationEngine then restores the independent Home candidate with FLAG_SYSTEM.
+     */
+    fun applyCombined(
+        context: Context,
+        file: File,
+        orientation: ResolvedOrientation
+    ): CombinedWallpaperApplyResult {
+        val manager = WallpaperManager.getInstance(context)
+        assertWallpaperAllowed(manager)
+        val beforeHome = runCatching { manager.getWallpaperId(WallpaperManager.FLAG_SYSTEM) }.getOrDefault(-1)
+        val beforeLock = runCatching { manager.getWallpaperId(WallpaperManager.FLAG_LOCK) }.getOrDefault(-1)
+        val prepared = prepareBitmap(context, file, orientation)
+
+        Diagnostics.log(
+            context,
+            "wallpaper.apply_combined.start",
+            fields = mapOf(
+                "file" to file.name,
+                "bytes" to file.length(),
+                "orientation" to orientation.name,
+                "beforeHomeId" to beforeHome,
+                "beforeLockId" to beforeLock
+            )
+        )
+
+        val homeProbe = WallpaperDeepDiagnostics.begin(
+            context,
+            manager,
+            WallpaperManager.FLAG_SYSTEM,
+            "home-combined",
+            prepared.bitmap,
+            file
+        )
+        val lockProbe = WallpaperDeepDiagnostics.begin(
+            context,
+            manager,
+            WallpaperManager.FLAG_LOCK,
+            "lock",
+            prepared.bitmap,
+            file
+        )
+
+        try {
+            val returnedId = manager.setBitmap(
+                prepared.bitmap,
+                null,
+                false,
+                WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK
+            )
+            if (returnedId <= 0) {
+                error("WallpaperManager a refusé l'application combinée (ID retourné : $returnedId)")
+            }
+            WallpaperDeepDiagnostics.afterSet(homeProbe, returnedId)
+            WallpaperDeepDiagnostics.afterSet(lockProbe, returnedId)
+            val afterHome = runCatching { manager.getWallpaperId(WallpaperManager.FLAG_SYSTEM) }.getOrDefault(-1)
+            val afterLock = runCatching { manager.getWallpaperId(WallpaperManager.FLAG_LOCK) }.getOrDefault(-1)
+            Diagnostics.log(
+                context,
+                "wallpaper.apply_combined.success",
+                fields = mapOf(
+                    "returnedId" to returnedId,
+                    "beforeHomeId" to beforeHome,
+                    "afterHomeId" to afterHome,
+                    "beforeLockId" to beforeLock,
+                    "afterLockId" to afterLock,
+                    "width" to prepared.width,
+                    "height" to prepared.height
+                )
+            )
+            return CombinedWallpaperApplyResult(
+                home = WallpaperApplyResult("home-combined", returnedId, beforeHome, afterHome),
+                lock = WallpaperApplyResult("lock", returnedId, beforeLock, afterLock)
+            )
+        } catch (failure: Throwable) {
+            Diagnostics.log(
+                context,
+                "wallpaper.apply_combined.failure",
+                level = "ERROR",
+                fields = mapOf("beforeHomeId" to beforeHome, "beforeLockId" to beforeLock),
+                throwable = failure
+            )
+            throw failure
+        } finally {
+            WallpaperDeepDiagnostics.end(lockProbe)
+            WallpaperDeepDiagnostics.end(homeProbe)
+            prepared.bitmap.recycle()
+        }
+    }
+
+    private data class PreparedBitmap(val bitmap: Bitmap, val width: Int, val height: Int)
+
+    private fun prepareBitmap(
+        context: Context,
+        file: File,
+        orientation: ResolvedOrientation
+    ): PreparedBitmap {
+        val (targetWidth, targetHeight) = targetSize(context, orientation)
+        val bitmap = decodeSampled(file, targetWidth * 2, targetHeight * 2)
+            ?: error("Impossible de décoder ${file.name}")
+        val cropped = centerCrop(bitmap, targetWidth, targetHeight)
+        if (cropped !== bitmap) bitmap.recycle()
+        return PreparedBitmap(cropped, targetWidth, targetHeight)
+    }
+
+    private fun assertWallpaperAllowed(manager: WallpaperManager) {
+        if (!manager.isWallpaperSupported()) {
+            error("Android indique que les fonds d'écran ne sont pas pris en charge sur cet appareil")
+        }
+        if (!manager.isSetWallpaperAllowed()) {
+            error("Android interdit actuellement à l'application de modifier le fond d'écran")
         }
     }
 

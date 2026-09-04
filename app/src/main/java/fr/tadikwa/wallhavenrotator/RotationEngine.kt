@@ -2,6 +2,7 @@ package fr.tadikwa.wallhavenrotator
 
 import android.app.WallpaperManager
 import android.content.Context
+import android.os.Build
 import java.io.File
 
 data class RotationOutcome(
@@ -94,12 +95,22 @@ object RotationEngine {
                         cache
                     )
 
-                    val home = applyPrepared(appContext, homePrepared, orientation, cache)
-                    val lock = applyPrepared(appContext, lockPrepared, orientation, cache)
-                    RotationOutcome(
-                        destinations = listOf(home.destination, lock.destination),
-                        wallhavenIds = listOf(home.wallhavenId, lock.wallhavenId)
-                    )
+                    if (useHonorCombinedCompatibility()) {
+                        rotateIndependentHonorCompatibility(
+                            appContext = appContext,
+                            homePrepared = homePrepared,
+                            lockPrepared = lockPrepared,
+                            orientation = orientation,
+                            cache = cache
+                        )
+                    } else {
+                        val home = applyPrepared(appContext, homePrepared, orientation, cache)
+                        val lock = applyPrepared(appContext, lockPrepared, orientation, cache)
+                        RotationOutcome(
+                            destinations = listOf(home.destination, lock.destination),
+                            wallhavenIds = listOf(home.wallhavenId, lock.wallhavenId)
+                        )
+                    }
                 }
             }
 
@@ -173,6 +184,71 @@ object RotationEngine {
         cache.consume(prepared.poolKey, prepared.wallpaper)
         return Applied(applyResult.destination, prepared.wallpaper.id)
     }
+
+
+    private fun rotateIndependentHonorCompatibility(
+        appContext: Context,
+        homePrepared: Prepared,
+        lockPrepared: Prepared,
+        orientation: ResolvedOrientation,
+        cache: WallpaperCache
+    ): RotationOutcome {
+        Diagnostics.log(
+            appContext,
+            "lock.compatibility.begin",
+            fields = mapOf(
+                "method" to "combined_then_restore_home",
+                "manufacturer" to Build.MANUFACTURER,
+                "brand" to Build.BRAND,
+                "homeWallpaperId" to homePrepared.wallpaper.id,
+                "lockWallpaperId" to lockPrepared.wallpaper.id
+            )
+        )
+
+        // Controlled A/B against alpha.5: submit the lock candidate with the exact
+        // combined SYSTEM|LOCK call used by the original implementation, then restore
+        // the independent Home candidate with a SYSTEM-only call. If the visible HONOR
+        // lock screen reacts to the combined write, this gives us a reproducible path
+        // without pretending the alpha.5 FLAG_LOCK diagnostics were a visual proof.
+        WallpaperApplier.applyCombined(appContext, lockPrepared.file, orientation)
+        val homeResult = WallpaperApplier.apply(
+            appContext,
+            homePrepared.file,
+            WallpaperManager.FLAG_SYSTEM,
+            orientation
+        )
+
+        val immediateLock = WallpaperDeepDiagnostics.snapshotSummary(
+            appContext,
+            WallpaperManager.FLAG_LOCK
+        )
+        Thread.sleep(1000)
+        val delayedLock = WallpaperDeepDiagnostics.snapshotSummary(
+            appContext,
+            WallpaperManager.FLAG_LOCK
+        )
+        Diagnostics.log(
+            appContext,
+            "lock.compatibility.after_home_restore",
+            fields = mapOf(
+                "method" to "combined_then_restore_home",
+                "immediateLock" to immediateLock,
+                "plus1000msLock" to delayedLock
+            )
+        )
+
+        cache.consume(lockPrepared.poolKey, lockPrepared.wallpaper)
+        cache.consume(homePrepared.poolKey, homePrepared.wallpaper)
+
+        return RotationOutcome(
+            destinations = listOf(homeResult.destination, "lock"),
+            wallhavenIds = listOf(homePrepared.wallpaper.id, lockPrepared.wallpaper.id)
+        )
+    }
+
+    private fun useHonorCombinedCompatibility(): Boolean =
+        Build.MANUFACTURER.equals("HONOR", ignoreCase = true) ||
+            Build.BRAND.equals("HONOR", ignoreCase = true)
 
     private fun rotateSameOnBoth(
         context: Context,

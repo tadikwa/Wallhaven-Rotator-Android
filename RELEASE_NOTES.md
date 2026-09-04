@@ -1,15 +1,14 @@
-## 0.1.0-alpha.5
+## 0.1.0-alpha.6
 
-Deep lockscreen diagnostic build. This release intentionally avoids another speculative lockscreen workaround and instead records stronger public-API evidence around each wallpaper write.
+Controlled follow-up to the alpha.5 on-device diagnostics.
 
-- Keep the alpha.4 rotation, rate-limit, cache and suggestive-content behavior unchanged
-- Save the exact cropped bitmap submitted to Home/Lock as bounded diagnostic previews (one file per destination)
-- Record SHA-256 of the source wallpaper and submitted preview
-- Record expected `WallpaperColors` derived from the submitted bitmap
-- Capture wallpaper ID, `WallpaperColors`, wallpaper-info state, keyguard state, screen interactive state and desired wallpaper dimensions before/after writes
-- For Lock writes, capture snapshots immediately, after 500 ms and after 2.5 s to detect quick replacement/reversion
-- Temporarily listen for `ACTION_WALLPAPER_CHANGED`, screen on/off/user-present broadcasts and `OnColorsChangedListener` callbacks around the write
-- Attach the latest submitted Home/Lock previews alongside the text report when sharing diagnostics
-- Do not request broad storage access just to read the Android wallpaper back
+- On HONOR devices in independent Home/Lock mode, test the original combined `FLAG_SYSTEM | FLAG_LOCK` write for the Lock candidate, then restore the independent Home candidate with `FLAG_SYSTEM`.
+- Keep deep wallpaper ID/color/broadcast diagnostics around both the combined write and the Home restore.
+- Strengthen suggestive-content filtering without over-constraining Wallhaven search queries.
+- `Moins suggestif` and `Strict` now reject `schoolgirl`/`loli` at query level and verify the detailed wallpaper tags before downloading.
+- `Strict` uses the same broad query as `Moins suggestif`, then performs a stricter metadata pass instead of stacking many negative search terms.
+- Add a local Wallhaven API rate limiter with headroom below the documented 45 requests/minute.
+- Improve empty-profile errors so they identify Source / Category / content-filter instead of blaming a generic mode.
+- Keep the alpha.5 deep diagnostics and submitted Home/Lock preview export.
 
-The goal of alpha.5 is diagnosis, not to assume an HONOR/MagicOS cause. Android 14+ prevents ordinary apps from reading the real wallpaper bitmap back through `getWallpaperFile()` without broad/privileged storage access, so the app uses IDs, colors, callbacks, state snapshots and the exact submitted image instead.
+This remains a validation alpha. No release is created.

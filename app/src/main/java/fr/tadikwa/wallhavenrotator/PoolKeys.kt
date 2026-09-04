@@ -31,7 +31,8 @@ object PoolKeys {
             profile.source.name,
             profile.category.name,
             profile.query.trim(),
-            profile.contentFilter.name
+            profile.contentFilter.name,
+            "content-policy-${ContentFilterPolicy.POLICY_VERSION}"
         ).joinToString("\u001f")
         val digest = MessageDigest.getInstance("SHA-256")
             .digest(canonical.toByteArray(Charsets.UTF_8))

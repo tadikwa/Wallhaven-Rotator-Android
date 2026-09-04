@@ -52,7 +52,9 @@ data class AppSettings(
     val orientationMode: OrientationMode = OrientationMode.AUTO,
     val cacheLimitMb: Int = CachePolicy.DEFAULT_LIMIT_MB,
     val homeProfile: ProfileSettings = ProfileSettings(),
-    val lockProfile: ProfileSettings = ProfileSettings(source = SourceMode.TRENDING, category = CategoryMode.GENERAL)
+    // Keep the default Lock profile broad. Trending + General + portrait can legitimately
+    // be empty on a given day, which made the whole independent rotation look broken.
+    val lockProfile: ProfileSettings = ProfileSettings()
 )
 
 data class WallhavenItem(

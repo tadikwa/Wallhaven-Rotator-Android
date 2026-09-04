@@ -102,6 +102,9 @@ class WallpaperCache(private val context: Context) {
         var seed = prefs.getString(seedKey, null)
         var attempts = 0
         var downloadFailures = 0
+        var metadataChecks = 0
+        var contentRejected = 0
+        var metadataLimitReached = false
         var lastFailure: Throwable? = null
         var abortRefill = false
         var diskBudgetReached = stats().bytes >= CachePolicy.refillStopBytes(cacheLimitMb) && existing.isNotEmpty()
@@ -163,6 +166,61 @@ class WallpaperCache(private val context: Context) {
                 if (existing.size >= requestedTarget) break
                 if (item.id in history || item.id in queuedIds) continue
 
+                if (ContentFilterPolicy.requiresMetadataInspection(profile.contentFilter)) {
+                    if (metadataChecks >= ContentFilterPolicy.MAX_METADATA_CHECKS_PER_REFILL) {
+                        metadataLimitReached = true
+                        Diagnostics.log(
+                            context,
+                            "content.metadata_limit",
+                            level = "WARN",
+                            fields = mapOf(
+                                "pool" to poolKey,
+                                "limit" to ContentFilterPolicy.MAX_METADATA_CHECKS_PER_REFILL,
+                                "contentFilter" to profile.contentFilter.name
+                            )
+                        )
+                        break
+                    }
+                    val tags = try {
+                        metadataChecks += 1
+                        client.tags(item.id)
+                    } catch (failure: Throwable) {
+                        lastFailure = failure
+                        if (shouldAbortRefill(failure)) {
+                            abortRefill = true
+                        }
+                        Diagnostics.log(
+                            context,
+                            "content.metadata_failure",
+                            level = "WARN",
+                            fields = mapOf(
+                                "pool" to poolKey,
+                                "wallhavenId" to item.id,
+                                "contentFilter" to profile.contentFilter.name
+                            ),
+                            throwable = failure
+                        )
+                        if (abortRefill) break else continue
+                    }
+                    val blocked = ContentFilterPolicy.blockedTags(tags, profile.contentFilter)
+                    Diagnostics.log(
+                        context,
+                        "content.metadata_checked",
+                        fields = mapOf(
+                            "pool" to poolKey,
+                            "wallhavenId" to item.id,
+                            "contentFilter" to profile.contentFilter.name,
+                            "tagCount" to tags.size,
+                            "tags" to tags.joinToString(",").take(1500),
+                            "blockedTags" to blocked.joinToString(",")
+                        )
+                    )
+                    if (blocked.isNotEmpty()) {
+                        contentRejected += 1
+                        continue
+                    }
+                }
+
                 val extension = item.path.substringAfterLast('.', "jpg").substringBefore('?').lowercase()
                     .takeIf { it in setOf("jpg", "jpeg", "png", "webp") } ?: "jpg"
                 val fileName = "${item.id}.$extension"
@@ -214,7 +272,7 @@ class WallpaperCache(private val context: Context) {
                 if (profile.source == SourceMode.RANDOM) seed = null
                 break
             }
-            if (diskBudgetReached || abortRefill || result.items.isEmpty()) break
+            if (diskBudgetReached || abortRefill || metadataLimitReached || result.items.isEmpty()) break
         }
 
         prefs.edit()
@@ -236,6 +294,9 @@ class WallpaperCache(private val context: Context) {
                 "after" to finalQueue.size,
                 "attempts" to attempts,
                 "downloadFailures" to downloadFailures,
+                "metadataChecks" to metadataChecks,
+                "contentRejected" to contentRejected,
+                "metadataLimitReached" to metadataLimitReached,
                 "diskBudgetReached" to diskBudgetReached,
                 "networkAbort" to abortRefill,
                 "cacheBytes" to stats().bytes
@@ -244,8 +305,13 @@ class WallpaperCache(private val context: Context) {
 
         if (finalQueue.isEmpty()) {
             val failure = lastFailure
+            if (failure != null && abortRefill) throw failure
+            val profileLabel = "${profile.source.label} / ${profile.category.label} / ${profile.contentFilter.label}"
+            if (contentRejected > 0 || metadataLimitReached) {
+                error("Aucun wallpaper accepté par le filtre pour le profil $profileLabel")
+            }
             if (failure != null) throw failure
-            error("Wallhaven n'a renvoyé aucun wallpaper utilisable pour ce profil")
+            error("Wallhaven ne renvoie aucun wallpaper pour le profil $profileLabel")
         }
     }
 

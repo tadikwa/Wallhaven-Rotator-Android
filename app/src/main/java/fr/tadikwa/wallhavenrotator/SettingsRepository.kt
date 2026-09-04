@@ -12,10 +12,7 @@ class SettingsRepository(context: Context) {
         orientationMode = enumValueOrDefault(prefs.getString("orientation", null), OrientationMode.AUTO),
         cacheLimitMb = CachePolicy.normalizeLimitMb(prefs.getInt("cache_limit_mb", CachePolicy.DEFAULT_LIMIT_MB)),
         homeProfile = loadProfile("home", ProfileSettings()),
-        lockProfile = loadProfile(
-            "lock",
-            ProfileSettings(SourceMode.TRENDING, CategoryMode.GENERAL)
-        )
+        lockProfile = loadProfile("lock", ProfileSettings())
     )
 
     fun save(settings: AppSettings) {

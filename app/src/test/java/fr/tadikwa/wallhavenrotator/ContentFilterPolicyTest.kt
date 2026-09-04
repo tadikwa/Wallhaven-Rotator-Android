@@ -16,22 +16,38 @@ class ContentFilterPolicyTest {
     }
 
     @Test
-    fun reducedAddsHighSignalExclusionsWithoutRemovingAnime() {
-        val query = ContentFilterPolicy.compose("+anime", ContentFilterMode.REDUCED)
-        assertTrue(query.contains("+anime"))
-        assertTrue(query.contains("-cleavage"))
-        assertTrue(query.contains("-lingerie"))
-        assertFalse(query.contains("-anime"))
+    fun filteredModesKeepAnimeButExcludeYouthCodedAndSexualTags() {
+        val reduced = ContentFilterPolicy.compose("+anime", ContentFilterMode.REDUCED)
+        val strict = ContentFilterPolicy.compose("+anime", ContentFilterMode.STRICT)
+        assertTrue(reduced.contains("+anime"))
+        assertTrue(reduced.contains("-cleavage"))
+        assertTrue(reduced.contains("-schoolgirl"))
+        assertTrue(reduced.contains("-loli"))
+        assertFalse(reduced.contains("-anime"))
+        // Strict deliberately uses the same broad query and tightens via metadata.
+        assertEquals(reduced, strict)
     }
 
     @Test
-    fun strictUsesOnlyDocumentedSingleTokenExclusions() {
-        val query = ContentFilterPolicy.compose("", ContentFilterMode.STRICT)
-        assertTrue(query.contains("-fishnet"))
-        assertTrue(query.contains("-garter"))
-        assertTrue(query.contains("-boobs"))
-        assertFalse(query.contains("{"))
-        assertFalse(query.contains("}"))
+    fun metadataPassBlocksSchoolgirlInReducedAndMoreInStrict() {
+        assertTrue(
+            ContentFilterPolicy.blockedTags(
+                listOf("schoolgirl", "blonde", "anime"),
+                ContentFilterMode.REDUCED
+            ).contains("schoolgirl")
+        )
+        assertTrue(
+            ContentFilterPolicy.blockedTags(
+                listOf("fishnet stockings", "portrait"),
+                ContentFilterMode.STRICT
+            ).contains("fishnet stockings")
+        )
+        assertTrue(
+            ContentFilterPolicy.blockedTags(
+                listOf("fishnet stockings", "portrait"),
+                ContentFilterMode.REDUCED
+            ).isEmpty()
+        )
     }
 
     @Test
