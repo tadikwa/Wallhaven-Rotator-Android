@@ -20,7 +20,12 @@ object RotationScheduler {
             return
         }
         val minutes = settings.intervalMinutes.coerceAtLeast(15L)
-        val request = PeriodicWorkRequestBuilder<RotationWorker>(minutes, TimeUnit.MINUTES).build()
+        val request = PeriodicWorkRequestBuilder<RotationWorker>(minutes, TimeUnit.MINUTES)
+            // Saving settings must not immediately rotate the wallpaper. Preload is
+            // responsible for warming the pools; the first automatic change happens
+            // only after the requested interval has elapsed.
+            .setInitialDelay(minutes, TimeUnit.MINUTES)
+            .build()
         manager.enqueueUniquePeriodicWork(PERIODIC_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
     }
 

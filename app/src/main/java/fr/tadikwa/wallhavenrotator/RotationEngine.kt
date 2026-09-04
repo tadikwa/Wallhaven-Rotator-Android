@@ -95,6 +95,10 @@ object RotationEngine {
                         cache
                     )
 
+                    check(homePrepared.wallpaper.id != lockPrepared.wallpaper.id) {
+                        "Les profils indépendants ont sélectionné le même wallpaper Wallhaven (${homePrepared.wallpaper.id})"
+                    }
+
                     if (useHonorCombinedCompatibility()) {
                         rotateIndependentHonorCompatibility(
                             appContext = appContext,
@@ -197,7 +201,7 @@ object RotationEngine {
             appContext,
             "lock.compatibility.begin",
             fields = mapOf(
-                "method" to "combined_then_restore_home",
+                "method" to "combined_then_immediate_home_restore",
                 "manufacturer" to Build.MANUFACTURER,
                 "brand" to Build.BRAND,
                 "homeWallpaperId" to homePrepared.wallpaper.id,
@@ -205,35 +209,27 @@ object RotationEngine {
             )
         )
 
-        // Controlled A/B against alpha.5: submit the lock candidate with the exact
-        // combined SYSTEM|LOCK call used by the original implementation, then restore
-        // the independent Home candidate with a SYSTEM-only call. If the visible HONOR
-        // lock screen reacts to the combined write, this gives us a reproducible path
-        // without pretending the alpha.5 FLAG_LOCK diagnostics were a visual proof.
-        WallpaperApplier.applyCombined(appContext, lockPrepared.file, orientation)
-        val homeResult = WallpaperApplier.apply(
-            appContext,
-            homePrepared.file,
-            WallpaperManager.FLAG_SYSTEM,
-            orientation
+        // Alpha.6 proved that HONOR visibly refreshes the lock screen when the Lock
+        // candidate is submitted with SYSTEM|LOCK. The old diagnostic implementation
+        // intentionally waited for several seconds before restoring Home, making both
+        // screens visibly identical for a while. Alpha.7 prepares both bitmaps first,
+        // performs the combined Lock write, and restores Home immediately.
+        val pair = WallpaperApplier.applyHonorIndependentPair(
+            context = appContext,
+            homeFile = homePrepared.file,
+            lockFile = lockPrepared.file,
+            orientation = orientation
         )
 
-        val immediateLock = WallpaperDeepDiagnostics.snapshotSummary(
-            appContext,
-            WallpaperManager.FLAG_LOCK
-        )
-        Thread.sleep(1000)
-        val delayedLock = WallpaperDeepDiagnostics.snapshotSummary(
-            appContext,
-            WallpaperManager.FLAG_LOCK
-        )
         Diagnostics.log(
             appContext,
-            "lock.compatibility.after_home_restore",
+            "lock.compatibility.final",
             fields = mapOf(
-                "method" to "combined_then_restore_home",
-                "immediateLock" to immediateLock,
-                "plus1000msLock" to delayedLock
+                "method" to "combined_then_immediate_home_restore",
+                "homeId" to pair.home.afterId,
+                "lockId" to pair.lock.afterId,
+                "homeWallhavenId" to homePrepared.wallpaper.id,
+                "lockWallhavenId" to lockPrepared.wallpaper.id
             )
         )
 
@@ -241,7 +237,7 @@ object RotationEngine {
         cache.consume(homePrepared.poolKey, homePrepared.wallpaper)
 
         return RotationOutcome(
-            destinations = listOf(homeResult.destination, "lock"),
+            destinations = listOf("home", "lock"),
             wallhavenIds = listOf(homePrepared.wallpaper.id, lockPrepared.wallpaper.id)
         )
     }

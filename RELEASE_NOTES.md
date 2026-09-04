@@ -1,14 +1,14 @@
-## 0.1.0-alpha.6
+## 0.1.0-alpha.7
 
-Controlled follow-up to the alpha.5 on-device diagnostics.
+Independent-wallpaper stabilization after validating the HONOR compatibility path.
 
-- On HONOR devices in independent Home/Lock mode, test the original combined `FLAG_SYSTEM | FLAG_LOCK` write for the Lock candidate, then restore the independent Home candidate with `FLAG_SYSTEM`.
-- Keep deep wallpaper ID/color/broadcast diagnostics around both the combined write and the Home restore.
-- Strengthen suggestive-content filtering without over-constraining Wallhaven search queries.
-- `Moins suggestif` and `Strict` now reject `schoolgirl`/`loli` at query level and verify the detailed wallpaper tags before downloading.
-- `Strict` uses the same broad query as `Moins suggestif`, then performs a stricter metadata pass instead of stacking many negative search terms.
-- Add a local Wallhaven API rate limiter with headroom below the documented 45 requests/minute.
-- Improve empty-profile errors so they identify Source / Category / content-filter instead of blaming a generic mode.
-- Keep the alpha.5 deep diagnostics and submitted Home/Lock preview export.
+- Keep the HONOR combined SYSTEM|LOCK compatibility write that makes the visible lockscreen refresh.
+- Pre-decode both Home and Lock bitmaps before either WallpaperManager write.
+- Restore the independent Home bitmap immediately after the combined Lock write, with no 500 ms / 2.5 s diagnostic sleeps in the normal compatibility path.
+- Preserve lightweight diagnostics and submitted Home/Lock preview images without intentionally extending the temporary combined state.
+- Enforce that independent Home and Lock candidates never use the same Wallhaven ID in one rotation.
+- Delay the first automatic WorkManager rotation by the configured interval after settings are saved; saving now preloads only.
+- Keep separate Home/Lock pools, global queued-ID deduplication and anti-repeat history.
+- No changes to stored settings keys: normal in-place signed updates preserve the existing SharedPreferences configuration.
 
-This remains a validation alpha. No release is created.
+Note: current CI validation APKs remain debug-signed. A persistent signing key is required before true OTA/in-place upgrades can preserve app data across builds.

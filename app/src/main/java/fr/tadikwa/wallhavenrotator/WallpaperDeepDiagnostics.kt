@@ -107,14 +107,18 @@ object WallpaperDeepDiagnostics {
     fun afterSet(probe: Probe, returnedId: Int) {
         logSnapshot(probe, "immediate", returnedId)
 
-        // The visual issue only concerns the lock screen. Give system components time
-        // to process callbacks and detect a quick revert/replacement after setBitmap().
+        // Deep diagnostic path retained for targeted troubleshooting only.
         if (probe.which == WallpaperManager.FLAG_LOCK) {
             Thread.sleep(500)
             logSnapshot(probe, "+500ms", returnedId)
             Thread.sleep(2000)
             logSnapshot(probe, "+2500ms", returnedId)
         }
+    }
+
+    /** Lightweight snapshot for normal operation. No diagnostic sleeps. */
+    fun afterSetFast(probe: Probe, returnedId: Int) {
+        logSnapshot(probe, "immediate-fast", returnedId)
     }
 
     fun end(probe: Probe) {
