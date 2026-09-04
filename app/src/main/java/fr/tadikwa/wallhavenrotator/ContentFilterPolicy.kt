@@ -3,7 +3,7 @@ package fr.tadikwa.wallhavenrotator
 object ContentFilterPolicy {
     // Bump whenever filtering semantics change. PoolKeys includes this value, so an
     // upgrade cannot keep serving wallpapers cached under an older/looser policy.
-    const val POLICY_VERSION = 3
+    const val POLICY_VERSION = 4
     const val MAX_METADATA_CHECKS_PER_REFILL = 16
 
     // Query-side exclusions stay deliberately short/high-signal. Metadata inspection
@@ -64,7 +64,15 @@ object ContentFilterPolicy {
         "ass",
         "butt",
         "buttocks",
-        "booty"
+        "booty",
+        "boobs",
+        "big boobs",
+        "breast",
+        "breasts",
+        "big breasts",
+        "large breasts",
+        "huge breasts",
+        "busty"
     )
 
     // Strict intentionally errs on the side of false positives. In addition to the
@@ -89,7 +97,11 @@ object ContentFilterPolicy {
         "pinup",
         "pin up",
         "actress",
-        "female model"
+        "female model",
+        "bodysuit",
+        "tight clothing",
+        "sensual gaze",
+        "lustful look"
     )
 
     private val strictFemaleSubjectWords = setOf(

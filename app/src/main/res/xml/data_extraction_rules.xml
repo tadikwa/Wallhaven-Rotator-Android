@@ -2,8 +2,12 @@
 <data-extraction-rules>
     <cloud-backup disableIfNoEncryptionCapabilities="true">
         <exclude domain="file" path="wallpapers/" />
+        <exclude domain="sharedpref" path="wallhaven_rotation_scheduler.xml" />
+        <exclude domain="sharedpref" path="wallhaven_rotation_service_status.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="wallpapers/" />
+        <exclude domain="sharedpref" path="wallhaven_rotation_scheduler.xml" />
+        <exclude domain="sharedpref" path="wallhaven_rotation_service_status.xml" />
     </device-transfer>
 </data-extraction-rules>

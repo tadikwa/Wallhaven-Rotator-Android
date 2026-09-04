@@ -7,29 +7,85 @@ import androidx.work.WorkerParameters
 class RotationWorker(appContext: Context, params: WorkerParameters) : Worker(appContext, params) {
     override fun doWork(): Result {
         val settings = SettingsRepository(applicationContext).load()
+        val manual = inputData.getBoolean("manual", false)
+
+        if (!settings.enabled && !manual) {
+            Diagnostics.log(applicationContext, "worker.rotation.skip_disabled")
+            return Result.success()
+        }
+
+        if (!manual) {
+            val claim = AutoRotationGate.claimIfDue(
+                applicationContext,
+                settings.intervalMinutes,
+                source = "workmanager"
+            )
+            Diagnostics.log(
+                applicationContext,
+                "worker.rotation.claim",
+                fields = mapOf(
+                    "attempt" to runAttemptCount,
+                    "allowed" to claim.allowed,
+                    "reason" to claim.reason,
+                    "previousDueAtMs" to claim.previousDueAtMs,
+                    "nextDueAtMs" to claim.nextDueAtMs,
+                    "target" to settings.targetMode.name
+                )
+            )
+            if (!claim.allowed) {
+                Diagnostics.log(
+                    applicationContext,
+                    "worker.rotation.skipped_not_due",
+                    fields = mapOf("attempt" to runAttemptCount, "nextDueAtMs" to claim.nextDueAtMs)
+                )
+                return Result.success()
+            }
+            RotationScheduler.requestAutomaticPriority(applicationContext, "workmanager")
+        }
+
         Diagnostics.log(
             applicationContext,
             "worker.rotation.start",
-            fields = mapOf("attempt" to runAttemptCount, "target" to settings.targetMode.name)
-        )
-        return try {
-            RotationEngine.rotateOnce(applicationContext, settings)
-            Diagnostics.log(
-                applicationContext,
-                "worker.rotation.success",
-                fields = mapOf("attempt" to runAttemptCount)
+            fields = mapOf(
+                "attempt" to runAttemptCount,
+                "target" to settings.targetMode.name,
+                "manual" to manual
             )
+        )
+
+        return try {
+            val outcome = if (manual) {
+                RotationEngine.rotateOnce(applicationContext, settings)
+            } else {
+                RotationEngine.tryRotateOnce(applicationContext, settings)
+            }
+            if (outcome == null) {
+                Diagnostics.log(
+                    applicationContext,
+                    "worker.rotation.skipped_busy",
+                    fields = mapOf("attempt" to runAttemptCount)
+                )
+            } else {
+                Diagnostics.log(
+                    applicationContext,
+                    "worker.rotation.success",
+                    fields = mapOf(
+                        "attempt" to runAttemptCount,
+                        "wallhavenIds" to outcome.wallhavenIds.joinToString(",")
+                    )
+                )
+            }
             Result.success()
         } catch (failure: Throwable) {
-            // A periodic rotation already has a future cadence. Immediate WorkManager
-            // retries caused request bursts when the network or Wallhaven was unhappy.
             Diagnostics.log(
                 applicationContext,
                 "worker.rotation.failure",
                 level = "ERROR",
-                fields = mapOf("attempt" to runAttemptCount),
+                fields = mapOf("attempt" to runAttemptCount, "manual" to manual),
                 throwable = failure
             )
+            // Never retry immediately. The persistent due gate and the foreground
+            // service/periodic fallback will provide the next opportunity.
             Result.success()
         }
     }

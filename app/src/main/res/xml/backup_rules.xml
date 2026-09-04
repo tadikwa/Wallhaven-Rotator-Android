@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
     <exclude domain="file" path="wallpapers/" />
+    <exclude domain="sharedpref" path="wallhaven_rotation_scheduler.xml" />
+    <exclude domain="sharedpref" path="wallhaven_rotation_service_status.xml" />
 </full-backup-content>

@@ -118,4 +118,15 @@ class ContentFilterPolicyTest {
         )
         assertNotEquals(standard, strict)
     }
+
+    @Test
+    fun strictRejectsAdultBodyTagsObservedInDiagnostics() {
+        val blocked = ContentFilterPolicy.blockedTags(
+            listOf("chromatic aberration", "big boobs", "bodysuit", "sensual gaze"),
+            ContentFilterMode.STRICT
+        )
+        assertTrue(blocked.contains("big boobs"))
+        assertTrue(blocked.contains("bodysuit"))
+        assertTrue(blocked.contains("sensual gaze"))
+    }
 }

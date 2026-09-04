@@ -4,6 +4,8 @@ import android.app.WallpaperManager
 import android.content.Context
 import android.os.Build
 import java.io.File
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 data class RotationOutcome(
     val destinations: List<String>,
@@ -18,14 +20,31 @@ data class RotationOutcome(
 }
 
 object RotationEngine {
-    // Manual actions and WorkManager can otherwise overlap and apply/refill the same
-    // pools at once. One in-process rotation at a time keeps destination ordering sane.
-    private val rotationLock = Any()
+    // Manual rotations wait for the current visible transition. Automatic callers use
+    // tryRotateOnce(): if another transition is already active they skip instead of
+    // building a backlog that later replays several wallpapers in a row.
+    private val rotationLock = ReentrantLock()
 
     fun rotateOnce(context: Context, settings: AppSettings): RotationOutcome =
-        synchronized(rotationLock) {
+        rotationLock.withLock {
             rotateOnceLocked(context.applicationContext, settings)
         }
+
+    fun tryRotateOnce(context: Context, settings: AppSettings): RotationOutcome? {
+        if (!rotationLock.tryLock()) {
+            Diagnostics.log(
+                context.applicationContext,
+                "rotation.skipped_busy",
+                fields = mapOf("target" to settings.targetMode.name)
+            )
+            return null
+        }
+        return try {
+            rotateOnceLocked(context.applicationContext, settings)
+        } finally {
+            rotationLock.unlock()
+        }
+    }
 
     private fun rotateOnceLocked(appContext: Context, settings: AppSettings): RotationOutcome {
         val cache = WallpaperCache(appContext)

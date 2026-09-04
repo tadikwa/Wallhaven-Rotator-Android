@@ -98,6 +98,11 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(Unit) {
+                    // Alpha.10 repairs the old periodic schedule exactly once, then ordinary
+                    // app opens never reset the automatic cadence. It also ensures the
+                    // foreground rotation service is running when auto rotation is enabled.
+                    RotationScheduler.reconcile(context.applicationContext, settings)
+
                     thread(name = "wallhaven-cache-maintenance") {
                         val maintained = WallpaperCache(context.applicationContext).maintenance(settings)
                         runOnUiThread {
@@ -175,10 +180,16 @@ class MainActivity : ComponentActivity() {
                             repository.save(snapshot)
                             manualRotationState = ManualRotationUiState.Running
 
-                            // Manual changes take priority over background cache warming.
-                            // Stop the current preload cooperatively so a cache miss cannot
-                            // make the button wait behind dozens of metadata/download calls.
-                            RotationScheduler.requestManualPriority(context)
+                            // "Changer maintenant" also persists the edited settings. If
+                            // automatic rotation is enabled, rebuild one clean schedule from
+                            // this point so the next automatic transition cannot arrive right
+                            // behind the manual one.
+                            if (snapshot.enabled) {
+                                RotationScheduler.configure(context, snapshot, reason = "manual_change")
+                                RotationScheduler.requestManualPriority(context, snapshot.intervalMinutes)
+                            } else {
+                                RotationScheduler.configure(context, snapshot, reason = "manual_change_disabled")
+                            }
                             Diagnostics.log(
                                 context,
                                 "manual_rotation.requested",
@@ -319,7 +330,10 @@ private fun MainScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(if (settings.enabled) "Activée" else "En pause", fontWeight = FontWeight.SemiBold)
-                            Text("WorkManager, intervalle minimal Android : 15 min", style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                "Service Android actif + WorkManager de secours ; intervalle minimal : 15 min",
+                                style = MaterialTheme.typography.bodySmall
+                            )
                         }
                         Switch(
                             checked = settings.enabled,

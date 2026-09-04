@@ -130,6 +130,10 @@ object Diagnostics {
             appendLine("bytes=${cacheStats.bytes}")
             appendLine("limitBytes=${CachePolicy.limitBytes(settings.cacheLimitMb)}")
             appendLine()
+            appendLine("[Scheduler]")
+            appendLine("gate=${AutoRotationGate.statusSummary(appContext)}")
+            appendLine("foregroundService=${RotationServiceStatus.summary(appContext)}")
+            appendLine()
             appendLine("[WorkManager]")
             appendLine("periodic=$periodic")
             appendLine("preload=$preload")
@@ -190,7 +194,7 @@ object Diagnostics {
     }.getOrElse { "unavailable:${it.javaClass.simpleName}:${it.message.orEmpty()}" }
 
     private fun formatWorkInfo(info: WorkInfo): String =
-        "id=${info.id},state=${info.state},attempt=${info.runAttemptCount}"
+        "id=${info.id},state=${info.state},attempt=${info.runAttemptCount},generation=${info.generation},nextScheduleTimeMs=${info.nextScheduleTimeMillis},initialDelayMs=${info.initialDelayMillis}"
 
     private fun logDirectory(context: Context): File =
         File(context.filesDir, DIRECTORY).apply { mkdirs() }
