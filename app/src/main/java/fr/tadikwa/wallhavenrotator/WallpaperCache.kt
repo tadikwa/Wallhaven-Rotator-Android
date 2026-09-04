@@ -35,7 +35,41 @@ class WallpaperCache(private val context: Context) {
         if (PoolPolicy.shouldRefill(count)) refill(poolKey, profile, orientation)
     }
 
-    fun countAll(): Int = rootDir().walkTopDown().count { it.isFile }
+    fun countAll(): Int = stats().files
+
+    fun stats(): CacheStats {
+        val files = rootDir().walkTopDown().filter { it.isFile }.toList()
+        return CacheStats(files = files.size, bytes = files.sumOf { it.length() })
+    }
+
+    @Synchronized
+    fun clearAll(): CacheStats {
+        val before = stats()
+        val root = rootDir()
+        root.deleteRecursively()
+        root.mkdirs()
+
+        val editor = prefs.edit()
+        prefs.all.keys.forEach { key ->
+            if (key.startsWith("queue_") || key.startsWith("page_") || key.startsWith("seed_")) {
+                editor.remove(key)
+            }
+        }
+        editor.apply()
+
+        Diagnostics.log(
+            context,
+            "cache.clear",
+            fields = mapOf("filesBefore" to before.files, "bytesBefore" to before.bytes)
+        )
+        return stats()
+    }
+
+    @Synchronized
+    fun maintenance(settings: AppSettings): CacheStats {
+        pruneToSettings(settings)
+        return stats()
+    }
 
     @Synchronized
     fun refill(poolKey: String, profile: ProfileSettings, orientation: ResolvedOrientation) {
@@ -47,11 +81,13 @@ class WallpaperCache(private val context: Context) {
         val queuedIds = loadAllQueuedIds().toMutableSet()
         val pageKey = "page_$poolKey"
         val seedKey = "seed_$poolKey"
+        val cacheLimitMb = SettingsRepository(context).load().cacheLimitMb
         var page = prefs.getInt(pageKey, 1).coerceAtLeast(1)
         var seed = prefs.getString(seedKey, null)
         var attempts = 0
         var downloadFailures = 0
         var lastFailure: Throwable? = null
+        var diskBudgetReached = stats().bytes >= CachePolicy.refillStopBytes(cacheLimitMb) && existing.isNotEmpty()
 
         Diagnostics.log(
             context,
@@ -61,14 +97,20 @@ class WallpaperCache(private val context: Context) {
                 "existing" to existing.size,
                 "source" to profile.source.name,
                 "category" to profile.category.name,
+                "contentFilter" to profile.contentFilter.name,
                 "orientation" to orientation.name,
-                "page" to page
+                "page" to page,
+                "limitMb" to cacheLimitMb
             )
         )
 
         // One page normally fills a pool. Extra pages are used only when history or
         // another active pool already owns many results, keeping API usage bounded.
-        while (existing.size < PoolPolicy.TARGET_SIZE && attempts < PoolPolicy.MAX_SEARCH_PAGES_PER_REFILL) {
+        while (
+            existing.size < PoolPolicy.TARGET_SIZE &&
+            attempts < PoolPolicy.MAX_SEARCH_PAGES_PER_REFILL &&
+            !diskBudgetReached
+        ) {
             val result = try {
                 client.search(profile, orientation, page = page, seed = seed)
             } catch (failure: Throwable) {
@@ -106,10 +148,27 @@ class WallpaperCache(private val context: Context) {
                 val destination = fileFor(poolKey, fileName)
                 runCatching {
                     client.download(item, destination)
+                    val hardLimitBytes = CachePolicy.limitBytes(cacheLimitMb)
+                    if (destination.length() > hardLimitBytes) {
+                        destination.delete()
+                        error("Wallpaper trop volumineux pour la limite de cache configurée")
+                    }
+
                     existing += CachedWallpaper(item.id, fileName)
                     queuedIds += item.id
+                    saveQueue(poolKey, existing)
+
+                    if (stats().bytes > hardLimitBytes) {
+                        enforceLimit(cacheLimitMb)
+                        existing.removeAll { !rawFileFor(poolKey, it.fileName).isFile }
+                    }
+                    if (existing.isNotEmpty() && stats().bytes >= CachePolicy.refillStopBytes(cacheLimitMb)) {
+                        diskBudgetReached = true
+                    }
                 }.onFailure { failure ->
                     destination.delete()
+                    existing.removeAll { it.id == item.id && it.fileName == fileName }
+                    saveQueue(poolKey, existing)
                     downloadFailures += 1
                     lastFailure = failure
                     Diagnostics.log(
@@ -120,6 +179,7 @@ class WallpaperCache(private val context: Context) {
                         throwable = failure
                     )
                 }
+                if (diskBudgetReached) break
             }
             saveQueue(poolKey, existing)
 
@@ -130,7 +190,7 @@ class WallpaperCache(private val context: Context) {
                 if (profile.source == SourceMode.RANDOM) seed = null
                 break
             }
-            if (result.items.isEmpty()) break
+            if (diskBudgetReached || result.items.isEmpty()) break
         }
 
         prefs.edit()
@@ -138,26 +198,33 @@ class WallpaperCache(private val context: Context) {
             .putString(seedKey, seed)
             .apply()
 
+        cleanupOrphans()
+        enforceLimit(cacheLimitMb)
+        val finalQueue = loadQueue(poolKey).filter { rawFileFor(poolKey, it.fileName).isFile }
+
         Diagnostics.log(
             context,
             "cache.refill.finish",
-            level = if (existing.isEmpty()) "WARN" else "INFO",
+            level = if (finalQueue.isEmpty()) "WARN" else "INFO",
             fields = mapOf(
                 "pool" to poolKey,
                 "before" to initialCount,
-                "after" to existing.size,
+                "after" to finalQueue.size,
                 "attempts" to attempts,
-                "downloadFailures" to downloadFailures
+                "downloadFailures" to downloadFailures,
+                "diskBudgetReached" to diskBudgetReached,
+                "cacheBytes" to stats().bytes
             )
         )
 
-        if (existing.isEmpty()) {
+        if (finalQueue.isEmpty()) {
             val failure = lastFailure
             if (failure != null) throw failure
             error("Wallhaven n'a renvoyé aucun wallpaper utilisable pour ce profil")
         }
     }
 
+    @Synchronized
     fun pruneToSettings(settings: AppSettings) {
         val active = PoolKeys.active(settings)
         rootDir().listFiles()?.filter { it.isDirectory && it.name !in active }?.forEach { it.deleteRecursively() }
@@ -173,12 +240,95 @@ class WallpaperCache(private val context: Context) {
             if (poolKey != null && poolKey !in active) editor.remove(key)
         }
         editor.apply()
+
+        cleanupOrphans()
+        enforceLimit(settings.cacheLimitMb)
+    }
+
+    private fun cleanupOrphans() {
+        val queuedPaths = buildSet {
+            prefs.all.forEach { (key, value) ->
+                if (!key.startsWith("queue_") || value !is String) return@forEach
+                val poolKey = key.removePrefix("queue_")
+                runCatching {
+                    val arr = JSONArray(value)
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.getJSONObject(i)
+                        add(rawFileFor(poolKey, obj.getString("file")).absolutePath)
+                    }
+                }
+            }
+        }
+
+        val root = rootDir()
+        var deleted = 0
+        var bytes = 0L
+        root.walkTopDown().filter { it.isFile }.forEach { file ->
+            if (file.absolutePath !in queuedPaths) {
+                bytes += file.length()
+                if (file.delete()) deleted += 1
+            }
+        }
+        root.walkBottomUp().filter { it.isDirectory && it != root }.forEach { dir ->
+            if (dir.listFiles().isNullOrEmpty()) dir.delete()
+        }
+        pruneMissingQueueEntries()
+
+        if (deleted > 0) {
+            Diagnostics.log(
+                context,
+                "cache.orphan_cleanup",
+                fields = mapOf("filesDeleted" to deleted, "bytesDeleted" to bytes)
+            )
+        }
+    }
+
+    private fun enforceLimit(limitMb: Int) {
+        val limitBytes = CachePolicy.limitBytes(limitMb)
+        val files = rootDir().walkTopDown().filter { it.isFile }.sortedBy { it.lastModified() }.toMutableList()
+        var total = files.sumOf { it.length() }
+        if (total <= limitBytes) return
+
+        var deleted = 0
+        var deletedBytes = 0L
+        for (file in files) {
+            if (total <= limitBytes) break
+            val length = file.length()
+            if (file.delete()) {
+                total -= length
+                deletedBytes += length
+                deleted += 1
+            }
+        }
+        pruneMissingQueueEntries()
+        Diagnostics.log(
+            context,
+            "cache.limit_enforced",
+            fields = mapOf(
+                "limitMb" to CachePolicy.normalizeLimitMb(limitMb),
+                "filesDeleted" to deleted,
+                "bytesDeleted" to deletedBytes,
+                "bytesAfter" to total
+            )
+        )
+    }
+
+    private fun pruneMissingQueueEntries() {
+        val queueKeys = prefs.all.keys.filter { it.startsWith("queue_") }
+        queueKeys.forEach { key ->
+            val poolKey = key.removePrefix("queue_")
+            val filtered = loadQueue(poolKey).filter { rawFileFor(poolKey, it.fileName).isFile }
+            saveQueue(poolKey, filtered)
+        }
     }
 
     private fun rootDir(): File = File(context.filesDir, "wallpapers").apply { mkdirs() }
 
     fun fileFor(poolKey: String, fileName: String): File =
         File(File(rootDir(), sanitize(poolKey)).apply { mkdirs() }, fileName)
+
+    private fun rawFileFor(poolKey: String, fileName: String): File =
+        File(File(rootDir(), sanitize(poolKey)), fileName)
 
     private fun loadQueue(poolKey: String): List<CachedWallpaper> {
         val raw = prefs.getString("queue_$poolKey", "[]") ?: "[]"
@@ -209,7 +359,7 @@ class WallpaperCache(private val context: Context) {
                 val arr = JSONArray(value)
                 for (i in 0 until arr.length()) {
                     val obj = arr.getJSONObject(i)
-                    if (fileFor(poolKey, obj.getString("file")).isFile) add(obj.getString("id"))
+                    if (rawFileFor(poolKey, obj.getString("file")).isFile) add(obj.getString("id"))
                 }
             }
         }

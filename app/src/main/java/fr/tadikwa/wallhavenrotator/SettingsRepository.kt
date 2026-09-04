@@ -10,6 +10,7 @@ class SettingsRepository(context: Context) {
         intervalMinutes = prefs.getLong("interval", 60L),
         targetMode = enumValueOrDefault(prefs.getString("target", null), TargetMode.BOTH_SAME),
         orientationMode = enumValueOrDefault(prefs.getString("orientation", null), OrientationMode.AUTO),
+        cacheLimitMb = CachePolicy.normalizeLimitMb(prefs.getInt("cache_limit_mb", CachePolicy.DEFAULT_LIMIT_MB)),
         homeProfile = loadProfile("home", ProfileSettings()),
         lockProfile = loadProfile(
             "lock",
@@ -23,6 +24,7 @@ class SettingsRepository(context: Context) {
             .putLong("interval", settings.intervalMinutes)
             .putString("target", settings.targetMode.name)
             .putString("orientation", settings.orientationMode.name)
+            .putInt("cache_limit_mb", CachePolicy.normalizeLimitMb(settings.cacheLimitMb))
             .apply()
         saveProfile("home", settings.homeProfile)
         saveProfile("lock", settings.lockProfile)
@@ -31,7 +33,11 @@ class SettingsRepository(context: Context) {
     private fun loadProfile(prefix: String, defaults: ProfileSettings): ProfileSettings = ProfileSettings(
         source = enumValueOrDefault(prefs.getString("${prefix}_source", null), defaults.source),
         category = enumValueOrDefault(prefs.getString("${prefix}_category", null), defaults.category),
-        query = prefs.getString("${prefix}_query", defaults.query) ?: defaults.query
+        query = prefs.getString("${prefix}_query", defaults.query) ?: defaults.query,
+        contentFilter = enumValueOrDefault(
+            prefs.getString("${prefix}_content_filter", null),
+            defaults.contentFilter
+        )
     )
 
     private fun saveProfile(prefix: String, profile: ProfileSettings) {
@@ -39,6 +45,7 @@ class SettingsRepository(context: Context) {
             .putString("${prefix}_source", profile.source.name)
             .putString("${prefix}_category", profile.category.name)
             .putString("${prefix}_query", profile.query)
+            .putString("${prefix}_content_filter", profile.contentFilter.name)
             .apply()
     }
 

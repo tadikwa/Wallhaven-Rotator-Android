@@ -87,6 +87,7 @@ class MainActivity : ComponentActivity() {
                 var diagnosticsState by remember {
                     mutableStateOf<DiagnosticsUiState>(DiagnosticsUiState.Idle)
                 }
+                var cacheStats by remember { mutableStateOf(WallpaperCache(context).stats()) }
 
                 fun applyUpdateResult(result: UpdateCheckResult) {
                     updateState = when (result) {
@@ -97,6 +98,12 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(Unit) {
+                    thread(name = "wallhaven-cache-maintenance") {
+                        val maintained = WallpaperCache(context.applicationContext).maintenance(settings)
+                        runOnUiThread {
+                            if (!isDestroyed && !isFinishing) cacheStats = maintained
+                        }
+                    }
                     if (UpdateManager.shouldAutoCheck(context)) {
                         updateState = UpdateUiState.Checking
                         UpdateManager.checkAsync(context, manual = false, callback = ::applyUpdateResult)
@@ -109,6 +116,7 @@ class MainActivity : ComponentActivity() {
                     updateState = updateState,
                     manualRotationState = manualRotationState,
                     diagnosticsState = diagnosticsState,
+                    cacheStats = cacheStats,
                     onCheckUpdate = {
                         updateState = UpdateUiState.Checking
                         UpdateManager.checkAsync(context, manual = true, callback = ::applyUpdateResult)
@@ -140,11 +148,20 @@ class MainActivity : ComponentActivity() {
                                 "enabled" to settings.enabled,
                                 "intervalMinutes" to settings.intervalMinutes,
                                 "target" to settings.targetMode.name,
-                                "orientation" to settings.orientationMode.name
+                                "orientation" to settings.orientationMode.name,
+                                "cacheLimitMb" to settings.cacheLimitMb,
+                                "homeContentFilter" to settings.homeProfile.contentFilter.name,
+                                "lockContentFilter" to settings.lockProfile.contentFilter.name
                             )
                         )
                         RotationScheduler.configure(context, settings)
                         if (settings.enabled) RotationScheduler.preload(context)
+                        thread(name = "wallhaven-cache-maintenance-save") {
+                            val maintained = WallpaperCache(context.applicationContext).maintenance(settings)
+                            runOnUiThread {
+                                if (!isDestroyed && !isFinishing) cacheStats = maintained
+                            }
+                        }
                         val message = if (settings.enabled) {
                             "Réglages enregistrés, préchargement lancé."
                         } else {
@@ -178,6 +195,7 @@ class MainActivity : ComponentActivity() {
                                                 )
                                             }
                                         )
+                                        cacheStats = WallpaperCache(context.applicationContext).stats()
                                         val toast = when (val state = manualRotationState) {
                                             is ManualRotationUiState.Success -> state.message
                                             is ManualRotationUiState.Error -> state.message
@@ -215,6 +233,17 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
+                    },
+                    onClearCache = {
+                        thread(name = "wallhaven-cache-clear") {
+                            val cleared = WallpaperCache(context.applicationContext).clearAll()
+                            runOnUiThread {
+                                if (!isDestroyed && !isFinishing) {
+                                    cacheStats = cleared
+                                    Toast.makeText(context, "Cache d'images vidé.", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
                     }
                 )
             }
@@ -243,11 +272,13 @@ private fun MainScreen(
     updateState: UpdateUiState,
     manualRotationState: ManualRotationUiState,
     diagnosticsState: DiagnosticsUiState,
+    cacheStats: CacheStats,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: (UpdateInfo) -> Unit,
     onSave: () -> Unit,
     onRotateNow: () -> Unit,
-    onShareDiagnostics: () -> Unit
+    onShareDiagnostics: () -> Unit,
+    onClearCache: () -> Unit
 ) {
     val context = LocalContext.current
     Scaffold(
@@ -266,7 +297,7 @@ private fun MainScreen(
             item {
                 StatusCard(
                     device = DeviceProfile.displayLabel(context, settings.orientationMode),
-                    cacheCount = WallpaperCache(context).countAll()
+                    cacheStats = cacheStats
                 )
             }
             item {
@@ -350,9 +381,22 @@ private fun MainScreen(
             item {
                 SettingCard("Cache et réseau") {
                     Text(
-                        "La rotation consomme d'abord le cache local. Une recharge Wallhaven n'est déclenchée que lorsque le pool tombe à ${PoolPolicy.LOW_WATERMARK} images ou moins. Chaque pool vise ${PoolPolicy.TARGET_SIZE} images.",
+                        "${cacheStats.files} image(s) • ${formatBytes(cacheStats.bytes)} utilisés. Le cache est nettoyé automatiquement et ne dépasse pas la limite globale choisie.",
                         style = MaterialTheme.typography.bodyMedium
                     )
+                    Spacer(Modifier.height(10.dp))
+                    CacheLimitDropdown(settings.cacheLimitMb) {
+                        onSettingsChanged(settings.copy(cacheLimitMb = it))
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Chaque pool vise ${PoolPolicy.TARGET_SIZE} images et se recharge à ${PoolPolicy.LOW_WATERMARK} ou moins. Les anciens pools et fichiers orphelins sont supprimés automatiquement.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedButton(onClick = onClearCache, modifier = Modifier.fillMaxWidth()) {
+                        Text("Vider le cache")
+                    }
                 }
             }
 
@@ -499,14 +543,17 @@ private fun DiagnosticsCard(
 }
 
 @Composable
-private fun StatusCard(device: String, cacheCount: Int) {
+private fun StatusCard(device: String, cacheStats: CacheStats) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
     ) {
         Column(Modifier.padding(16.dp)) {
             Text(device, fontWeight = FontWeight.Bold)
-            Text("$cacheCount wallpaper(s) actuellement en cache", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "${cacheStats.files} wallpaper(s) • ${formatBytes(cacheStats.bytes)} en cache",
+                style = MaterialTheme.typography.bodyMedium
+            )
         }
     }
 }
@@ -541,6 +588,19 @@ private fun ProfileCard(title: String, profile: ProfileSettings, onChanged: (Pro
             onSelected = { onChanged(profile.copy(category = it)) }
         )
         Spacer(Modifier.height(10.dp))
+        EnumDropdown(
+            label = "Contenu suggestif",
+            value = profile.contentFilter,
+            values = ContentFilterMode.entries,
+            text = { it.label },
+            onSelected = { onChanged(profile.copy(contentFilter = it)) }
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            ContentFilterPolicy.description(profile.contentFilter),
+            style = MaterialTheme.typography.bodySmall
+        )
+        Spacer(Modifier.height(10.dp))
         OutlinedTextField(
             value = profile.query,
             onValueChange = { onChanged(profile.copy(query = it)) },
@@ -570,6 +630,25 @@ private fun IntervalDropdown(value: Long, onSelected: (Long) -> Unit) {
         itemText = { it.second },
         onSelected = { onSelected(it.first) }
     )
+}
+
+@Composable
+private fun CacheLimitDropdown(value: Int, onSelected: (Int) -> Unit) {
+    val choices = CachePolicy.ALLOWED_LIMITS_MB.map { it to "$it Mo" }
+    DropdownSelector(
+        label = "Limite du cache",
+        selectedText = choices.firstOrNull { it.first == value }?.second ?: "${CachePolicy.DEFAULT_LIMIT_MB} Mo",
+        choices = choices,
+        itemText = { it.second },
+        onSelected = { onSelected(it.first) }
+    )
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L * 1024L -> String.format(java.util.Locale.US, "%.1f Go", bytes / (1024.0 * 1024.0 * 1024.0))
+    bytes >= 1024L * 1024L -> String.format(java.util.Locale.US, "%.1f Mo", bytes / (1024.0 * 1024.0))
+    bytes >= 1024L -> String.format(java.util.Locale.US, "%.1f Ko", bytes / 1024.0)
+    else -> "$bytes o"
 }
 
 @Composable

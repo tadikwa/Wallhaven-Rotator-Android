@@ -32,10 +32,17 @@ enum class CategoryMode(val label: String, val apiValue: String) {
     PEOPLE("People", "001")
 }
 
+enum class ContentFilterMode(val label: String) {
+    STANDARD("Standard"),
+    REDUCED("Moins suggestif"),
+    STRICT("Strict")
+}
+
 data class ProfileSettings(
     val source: SourceMode = SourceMode.RANDOM,
     val category: CategoryMode = CategoryMode.ALL,
-    val query: String = ""
+    val query: String = "",
+    val contentFilter: ContentFilterMode = ContentFilterMode.REDUCED
 )
 
 data class AppSettings(
@@ -43,6 +50,7 @@ data class AppSettings(
     val intervalMinutes: Long = 60,
     val targetMode: TargetMode = TargetMode.BOTH_SAME,
     val orientationMode: OrientationMode = OrientationMode.AUTO,
+    val cacheLimitMb: Int = CachePolicy.DEFAULT_LIMIT_MB,
     val homeProfile: ProfileSettings = ProfileSettings(),
     val lockProfile: ProfileSettings = ProfileSettings(source = SourceMode.TRENDING, category = CategoryMode.GENERAL)
 )

@@ -1,18 +1,16 @@
-## 0.1.0-alpha.1
+## 0.1.0-alpha.3
 
-First Android prerelease of Wallhaven Rotator.
+Validation update focused on content filtering and bounded storage use.
 
-- Home screen and lock screen support
-- Same wallpaper on both screens or independent profiles
-- Phone/tablet automatic orientation policy
-- Portrait and landscape Wallhaven filters
-- Trending, Popular, New and Random sources
-- General, Anime, People and All categories
-- Cache-first rotation with 24-image pools and low-watermark refill
-- Profile-aware cache invalidation and cross-pool pending-ID deduplication
-- 1,000-ID anti-repeat history
-- WorkManager rotation from 15 minutes to 24 hours
-- Manual wallpaper change
-- SFW only, no telemetry
+- Per-profile suggestive-content modes: Standard, Reduced and Strict
+- Tag-based exclusion policy that keeps Anime available instead of requiring `-anime`
+- Content-filter changes invalidate the affected cache pool automatically
+- Global wallpaper-cache cap: 100 / 250 / 500 MiB, with 250 MiB default
+- Automatic cleanup of inactive pools, missing queue entries and orphan files
+- Cache enforcement during refills so storage cannot grow without bound
+- Refill stops near the configured disk budget to avoid download/eviction churn
+- Cache size shown in the UI and a manual **Clear cache** action
+- Diagnostic exports now include content-filter and cache-limit settings plus cache bytes
+- Retains alpha.2 manual-rotation, separate lockscreen application and diagnostics fixes
 
-This is an alpha build intended for functional validation on real devices. Android may defer periodic background work depending on battery and vendor scheduling policies.
+The suggestive-content filter is best-effort and depends on Wallhaven tags; it is not image recognition.

@@ -38,7 +38,7 @@ object WallhavenQuery {
         }
         params["ratios"] = ratios
 
-        val q = profile.query.trim()
+        val q = ContentFilterPolicy.compose(profile.query, profile.contentFilter)
         if (q.isNotEmpty()) params["q"] = q
         if (profile.source == SourceMode.RANDOM && !seed.isNullOrBlank()) params["seed"] = seed
 

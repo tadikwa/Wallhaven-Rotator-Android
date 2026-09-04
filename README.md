@@ -27,14 +27,18 @@ Android companion to **Wallhaven Rotator**, built around the public SFW Wallhave
   - Random = `random`
 - General / Anime / People / All categories
 - Optional Wallhaven search/tag expression per profile
+- Per-profile suggestive-content filter: Standard / Reduced / Strict
 - SFW-only requests (`purity=100`)
 - Local anti-repeat history (up to 1,000 Wallhaven IDs)
-- Profile-aware cache keys: changing source/category/tags immediately switches to a clean pool
+- Profile-aware cache keys: changing source/category/tags/content filtering immediately switches to a clean pool
 - Cross-pool queue deduplication so independent home/lock profiles do not download the same pending image
 - Cache-first rotation with batched refill:
   - target pool: 24 images
   - refill threshold: 6 images
   - API search is used to refill a pool, not on every wallpaper rotation
+  - configurable global disk cap: 100 / 250 / 500 MiB (250 MiB default)
+  - automatic orphan/obsolete-pool cleanup and manual **Clear cache** action
+  - refill stops near the disk budget instead of repeatedly downloading and immediately evicting images
 - WorkManager periodic rotation at 15 min, 30 min, 1 h, 3 h, 6 h, 12 h or 24 h
 - Manual "Change now"
 - Center-crop and downsample before applying the wallpaper to limit memory pressure
@@ -49,7 +53,17 @@ Android's `WallpaperManager` is used with `FLAG_SYSTEM` and `FLAG_LOCK` (API 24+
 
 Wallhaven search listings return up to 24 results per page. The app therefore uses a 24-item target pool. At a 15-minute rotation interval, one full pool represents roughly six hours of rotations per active profile. Refill is triggered only when the pool reaches six items or fewer. One API page normally fills a pool; additional pages are queried only when history or another active pool already owns too many of the returned IDs, with a hard cap of four search pages per refill.
 
-Images are downloaded into app-private storage. Once an image is successfully applied it is removed from the queue and its Wallhaven ID enters the anti-repeat history.
+Images are downloaded into app-private storage. Once an image is successfully applied it is removed from the queue and its Wallhaven ID enters the anti-repeat history. Old profile pools and orphaned files are removed automatically. A global disk budget is enforced after maintenance and during refills, so the wallpaper cache cannot grow without bound. Refill also stops before the hard cap when the disk budget is nearly full, preventing unnecessary API/image-download churn. Clearing the image cache does not clear the anti-repeat ID history.
+
+## Suggestive-content filtering
+
+Wallhaven Rotator always requests SFW results. An additional local, per-profile filter can append tag exclusions to the Wallhaven query:
+
+- **Standard**: no additional exclusions beyond Wallhaven SFW;
+- **Reduced**: excludes high-signal clothing/content tags such as cleavage, lingerie, underwear, panties, bikini/swimsuit and similar tags;
+- **Strict**: extends that exclusion list further and may hide more otherwise-SFW wallpapers.
+
+This is a tag-based best-effort filter, not image recognition. Its effectiveness depends on Wallhaven tagging. User-entered search terms are kept and combined with the selected filter, except exact `id:<tag-id>` searches because Wallhaven documents them as non-combinable.
 
 ## OTA updates
 
