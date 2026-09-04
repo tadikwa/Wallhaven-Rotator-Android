@@ -32,6 +32,9 @@ class RotationWorker(appContext: Context, params: WorkerParameters) : Worker(app
                     "target" to settings.targetMode.name
                 )
             )
+            // WorkManager is only a fallback in alpha.11, but whenever it wakes it
+            // also repairs the independent system AlarmManager deadline.
+            RotationAlarmScheduler.schedule(applicationContext, claim.nextDueAtMs)
             if (!claim.allowed) {
                 Diagnostics.log(
                     applicationContext,

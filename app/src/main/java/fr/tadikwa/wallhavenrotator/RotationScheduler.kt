@@ -14,10 +14,6 @@ import kotlin.math.max
 
 /**
  * In-process cooperative stop signal for background preloads.
- *
- * WorkManager cancellation alone is asynchronous. A visible rotation increments this
- * generation immediately, letting a running PreloadWorker notice the priority change
- * between network operations and release the cache lock quickly.
  */
 internal object PreloadControl {
     private val generation = AtomicLong(0L)
@@ -31,13 +27,6 @@ object RotationScheduler {
     private const val PERIODIC_NAME = "wallhaven_rotation"
     private const val PRELOAD_NAME = "wallhaven_preload"
 
-    /**
-     * Explicit settings save: throw away the old periodic generation completely.
-     *
-     * UPDATE preserves the original enqueue time by design, which is the opposite of
-     * what a settings Save needs and can leave OEM schedulers with stale generations.
-     * CANCEL_AND_REENQUEUE gives us one clean periodic request and a fresh cadence.
-     */
     fun configure(context: Context, settings: AppSettings, reason: String = "settings_save") {
         val appContext = context.applicationContext
         val manager = WorkManager.getInstance(appContext)
@@ -46,6 +35,7 @@ object RotationScheduler {
             PreloadControl.interrupt()
             manager.cancelUniqueWork(PERIODIC_NAME)
             manager.cancelUniqueWork(PRELOAD_NAME)
+            RotationAlarmScheduler.cancel(appContext)
             AutoRotationGate.clear(appContext)
             RotationForegroundService.stop(appContext)
             Diagnostics.log(appContext, "scheduler.disabled", fields = mapOf("reason" to reason))
@@ -62,7 +52,7 @@ object RotationScheduler {
             request
         )
         AutoRotationGate.markConfigVersion(appContext)
-        startForegroundServiceSafely(appContext, "configure:$reason")
+        val alarm = RotationAlarmScheduler.schedule(appContext, nextDueAt)
 
         Diagnostics.log(
             appContext,
@@ -70,16 +60,18 @@ object RotationScheduler {
             fields = mapOf(
                 "intervalMinutes" to minutes,
                 "nextDueAtMs" to nextDueAt,
-                "policy" to "CANCEL_AND_REENQUEUE",
+                "workPolicy" to "CANCEL_AND_REENQUEUE",
+                "alarmMode" to alarm.mode,
+                "exactAlarmAllowed" to alarm.exactAllowed,
                 "reason" to reason
             )
         )
     }
 
     /**
-     * Called when the UI opens. It repairs old alpha scheduling once, then stops
-     * touching cadence on ordinary app opens so opening the app can never postpone a
-     * pending automatic rotation.
+     * Opening the UI repairs/migrates the scheduler without postponing an existing
+     * deadline. Alpha.11 also re-registers the system AlarmManager trigger because
+     * those alarms live outside our process and survive MagicOS process cleanup.
      */
     fun reconcile(context: Context, settings: AppSettings) {
         val appContext = context.applicationContext
@@ -88,6 +80,7 @@ object RotationScheduler {
         if (!settings.enabled) {
             manager.cancelUniqueWork(PERIODIC_NAME)
             manager.cancelUniqueWork(PRELOAD_NAME)
+            RotationAlarmScheduler.cancel(appContext)
             RotationForegroundService.stop(appContext)
             return
         }
@@ -101,7 +94,7 @@ object RotationScheduler {
                     "toVersion" to AutoRotationGate.CONFIG_VERSION
                 )
             )
-            configure(appContext, settings, reason = "alpha10_migration")
+            configure(appContext, settings, reason = "alpha11_migration")
             return
         }
 
@@ -113,22 +106,40 @@ object RotationScheduler {
             ExistingPeriodicWorkPolicy.KEEP,
             periodicRequest(minutes, initialDelay)
         )
-        startForegroundServiceSafely(appContext, "reconcile")
+        val alarm = RotationAlarmScheduler.schedule(appContext, dueAt)
         Diagnostics.log(
             appContext,
             "scheduler.reconcile.ok",
-            fields = mapOf("nextDueAtMs" to dueAt, "intervalMinutes" to minutes)
+            fields = mapOf(
+                "nextDueAtMs" to dueAt,
+                "intervalMinutes" to minutes,
+                "alarmMode" to alarm.mode,
+                "exactAlarmAllowed" to alarm.exactAllowed
+            )
         )
     }
 
     fun recoverAfterSystemEvent(context: Context, settings: AppSettings, action: String) {
         if (!settings.enabled) return
-        // BOOT_COMPLETED and MY_PACKAGE_REPLACED are Android-documented exemptions for
-        // starting a foreground service from the background. Rebuild one clean cadence.
         configure(context.applicationContext, settings, reason = "system:$action")
     }
 
-    // Explicit settings changes restart cache warming against the current pools.
+    fun exactAlarmPermissionChanged(context: Context, settings: AppSettings) {
+        if (!settings.enabled) return
+        val appContext = context.applicationContext
+        val dueAt = AutoRotationGate.ensureInitialized(appContext, settings.intervalMinutes)
+        val alarm = RotationAlarmScheduler.schedule(appContext, dueAt)
+        Diagnostics.log(
+            appContext,
+            "scheduler.exact_alarm_permission_changed",
+            fields = mapOf(
+                "exactAlarmAllowed" to alarm.exactAllowed,
+                "alarmMode" to alarm.mode,
+                "dueAtMs" to alarm.dueAtMs
+            )
+        )
+    }
+
     fun preload(context: Context) {
         WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
             PRELOAD_NAME,
@@ -137,8 +148,6 @@ object RotationScheduler {
         )
     }
 
-    // Rotation completion only needs to ensure that one refill exists. KEEP avoids
-    // cancelling/restarting an already-running preload and prevents refill storms.
     fun preloadIfNeeded(context: Context) {
         val appContext = context.applicationContext
         if (!SettingsRepository(appContext).load().enabled) return
@@ -154,12 +163,14 @@ object RotationScheduler {
         val generation = PreloadControl.interrupt()
         WorkManager.getInstance(appContext).cancelUniqueWork(PRELOAD_NAME)
         val nextDue = AutoRotationGate.deferAfterManual(appContext, intervalMinutes)
+        val alarm = RotationAlarmScheduler.schedule(appContext, nextDue)
         Diagnostics.log(
             appContext,
             "scheduler.manual_priority",
             fields = mapOf(
                 "preloadGeneration" to generation,
-                "nextAutomaticDueAtMs" to nextDue
+                "nextAutomaticDueAtMs" to nextDue,
+                "alarmMode" to alarm.mode
             )
         )
     }
@@ -202,17 +213,4 @@ object RotationScheduler {
         )
         .addTag("wallhaven_preload")
         .build()
-
-    private fun startForegroundServiceSafely(context: Context, source: String) {
-        runCatching { RotationForegroundService.start(context) }
-            .onFailure { failure ->
-                Diagnostics.log(
-                    context,
-                    "service.rotation.start_failure",
-                    level = "ERROR",
-                    fields = mapOf("source" to source),
-                    throwable = failure
-                )
-            }
-    }
 }

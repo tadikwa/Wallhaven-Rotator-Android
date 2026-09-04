@@ -70,6 +70,16 @@ private sealed interface DiagnosticsUiState {
 }
 
 class MainActivity : ComponentActivity() {
+    override fun onResume() {
+        super.onResume()
+        val settings = SettingsRepository(applicationContext).load()
+        if (settings.enabled) {
+            // Returning from Android's exact-alarm special-access screen must immediately
+            // re-register the deadline as exact without postponing it.
+            RotationScheduler.reconcile(applicationContext, settings)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -98,10 +108,36 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(Unit) {
-                    // Alpha.10 repairs the old periodic schedule exactly once, then ordinary
-                    // app opens never reset the automatic cadence. It also ensures the
-                    // foreground rotation service is running when auto rotation is enabled.
+                    // Alpha.11 keeps the next deadline in AlarmManager, outside our
+                    // process, so MagicOS can kill the app without deleting the wake-up.
+                    val schedulerMigration =
+                        AutoRotationGate.configVersion(context.applicationContext) !=
+                            AutoRotationGate.CONFIG_VERSION
                     RotationScheduler.reconcile(context.applicationContext, settings)
+
+                    if (
+                        schedulerMigration &&
+                        settings.enabled &&
+                        !RotationAlarmScheduler.canScheduleExact(context)
+                    ) {
+                        Toast.makeText(
+                            context,
+                            "Autorise « Alarmes et rappels » pour la rotation automatique en arrière-plan.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        runCatching {
+                            context.startActivity(
+                                RotationAlarmScheduler.exactAlarmAccessIntent(context)
+                            )
+                        }.onFailure { failure ->
+                            Diagnostics.log(
+                                context,
+                                "alarm.permission.open_failure",
+                                level = "WARN",
+                                throwable = failure
+                            )
+                        }
+                    }
 
                     thread(name = "wallhaven-cache-maintenance") {
                         val maintained = WallpaperCache(context.applicationContext).maintenance(settings)
@@ -160,7 +196,28 @@ class MainActivity : ComponentActivity() {
                             )
                         )
                         RotationScheduler.configure(context, settings)
-                        if (settings.enabled) RotationScheduler.preload(context)
+                        if (settings.enabled) {
+                            RotationScheduler.preload(context)
+                            if (!RotationAlarmScheduler.canScheduleExact(context)) {
+                                Toast.makeText(
+                                    context,
+                                    "Autorise « Alarmes et rappels » pour une rotation fiable en arrière-plan.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                                runCatching {
+                                    context.startActivity(
+                                        RotationAlarmScheduler.exactAlarmAccessIntent(context)
+                                    )
+                                }.onFailure { failure ->
+                                    Diagnostics.log(
+                                        context,
+                                        "alarm.permission.open_failure",
+                                        level = "WARN",
+                                        throwable = failure
+                                    )
+                                }
+                            }
+                        }
                         thread(name = "wallhaven-cache-maintenance-save") {
                             val maintained = WallpaperCache(context.applicationContext).maintenance(settings)
                             runOnUiThread {
@@ -331,7 +388,7 @@ private fun MainScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(if (settings.enabled) "Activée" else "En pause", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Service Android actif + WorkManager de secours ; intervalle minimal : 15 min",
+                                "Alarme système Android + WorkManager de secours ; intervalle minimal : 15 min",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }

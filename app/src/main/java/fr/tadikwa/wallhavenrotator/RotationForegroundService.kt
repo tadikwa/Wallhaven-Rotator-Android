@@ -9,155 +9,153 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
-import java.text.DateFormat
-import java.util.Date
+import android.os.PowerManager
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.max
 
 /**
- * Keeps the automatic wallpaper cadence alive on OEMs that aggressively defer
- * WorkManager while the app is backgrounded. WorkManager remains enabled as a durable
- * fallback, but both paths share AutoRotationGate so they can never create a burst.
+ * Short-lived foreground service launched by AlarmManager.
+ *
+ * Alpha.10 kept a foreground service alive and timed with Handler.postDelayed(). On
+ * the tested HONOR device MagicOS killed that process in the background, so the timer
+ * vanished with it. Alpha.11 keeps the deadline in AlarmManager instead; this service
+ * only exists while a due rotation is actually being executed.
  */
 class RotationForegroundService : Service() {
-    private val handler = Handler(Looper.getMainLooper())
     private val executor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "wallhaven-auto-rotation-service")
+        Thread(runnable, "wallhaven-alarm-rotation")
     }
-    private val rotationInFlight = AtomicBoolean(false)
-    private val wakeRunnable = Runnable { tick() }
+    private val inFlight = AtomicBoolean(false)
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         promoteToForeground()
         RotationServiceStatus.setRunning(applicationContext, true)
-        Diagnostics.log(applicationContext, "service.rotation.created")
+        acquireWakeLock()
+        Diagnostics.log(applicationContext, "service.rotation.created", fields = mapOf("mode" to "one_shot_alarm"))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val action = intent?.action.orEmpty()
         Diagnostics.log(
             applicationContext,
             "service.rotation.start_command",
-            fields = mapOf("startId" to startId, "action" to (intent?.action ?: ""))
+            fields = mapOf("startId" to startId, "action" to action, "mode" to "one_shot_alarm")
         )
-        scheduleFromGate()
-        return START_STICKY
+
+        if (action != ACTION_RUN_ALARM) {
+            finishService(startId)
+            return START_NOT_STICKY
+        }
+
+        if (!inFlight.compareAndSet(false, true)) {
+            Diagnostics.log(applicationContext, "service.rotation.skip_inflight")
+            return START_NOT_STICKY
+        }
+
+        executor.execute {
+            try {
+                runDueRotation()
+            } finally {
+                inFlight.set(false)
+                finishService(startId)
+            }
+        }
+        return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        handler.removeCallbacks(wakeRunnable)
-        executor.shutdownNow()
+        releaseWakeLock()
+        executor.shutdown()
         RotationServiceStatus.setRunning(applicationContext, false)
-        Diagnostics.log(applicationContext, "service.rotation.destroyed")
+        Diagnostics.log(applicationContext, "service.rotation.destroyed", fields = mapOf("mode" to "one_shot_alarm"))
         super.onDestroy()
     }
 
-    private fun tick() {
-        handler.removeCallbacks(wakeRunnable)
-        val settings = SettingsRepository(applicationContext).load()
+    private fun runDueRotation() {
+        val appContext = applicationContext
+        val settings = SettingsRepository(appContext).load()
         if (!settings.enabled) {
-            Diagnostics.log(applicationContext, "service.rotation.stop_disabled")
-            stopSelf()
+            Diagnostics.log(appContext, "service.rotation.skip_disabled")
+            RotationAlarmScheduler.cancel(appContext)
             return
         }
 
-        val dueAt = AutoRotationGate.ensureInitialized(
-            applicationContext,
-            settings.intervalMinutes
+        val claim = AutoRotationGate.claimIfDue(
+            appContext,
+            settings.intervalMinutes,
+            source = "alarm_manager"
         )
-        val now = System.currentTimeMillis()
-        if (now < dueAt) {
-            updateNotification(dueAt)
-            scheduleAt(dueAt)
-            return
-        }
+        Diagnostics.log(
+            appContext,
+            "service.rotation.claim",
+            fields = mapOf(
+                "allowed" to claim.allowed,
+                "reason" to claim.reason,
+                "previousDueAtMs" to claim.previousDueAtMs,
+                "nextDueAtMs" to claim.nextDueAtMs,
+                "source" to "alarm_manager"
+            )
+        )
 
-        if (!rotationInFlight.compareAndSet(false, true)) {
-            Diagnostics.log(applicationContext, "service.rotation.skip_inflight")
-            handler.postDelayed(wakeRunnable, 5_000L)
-            return
-        }
+        // Always restore a system-owned next trigger. This also heals duplicate or
+        // slightly-early alarm delivery without changing the cadence gate.
+        RotationAlarmScheduler.schedule(appContext, claim.nextDueAtMs)
+        if (!claim.allowed) return
 
-        executor.execute {
-            try {
-                val current = SettingsRepository(applicationContext).load()
-                if (!current.enabled) return@execute
-
-                val claim = AutoRotationGate.claimIfDue(
-                    applicationContext,
-                    current.intervalMinutes,
-                    source = "foreground_service"
+        RotationScheduler.requestAutomaticPriority(appContext, source = "alarm_manager")
+        try {
+            val outcome = RotationEngine.rotateOnce(appContext, settings)
+            Diagnostics.log(
+                appContext,
+                "service.rotation.success",
+                fields = mapOf(
+                    "destinations" to outcome.destinations.joinToString(","),
+                    "wallhavenIds" to outcome.wallhavenIds.joinToString(","),
+                    "source" to "alarm_manager"
                 )
-                Diagnostics.log(
-                    applicationContext,
-                    "service.rotation.claim",
-                    fields = mapOf(
-                        "allowed" to claim.allowed,
-                        "reason" to claim.reason,
-                        "previousDueAtMs" to claim.previousDueAtMs,
-                        "nextDueAtMs" to claim.nextDueAtMs
-                    )
-                )
-                if (!claim.allowed) return@execute
-
-                RotationScheduler.requestAutomaticPriority(
-                    applicationContext,
-                    source = "foreground_service"
-                )
-                val outcome = RotationEngine.tryRotateOnce(applicationContext, current)
-                if (outcome == null) {
-                    Diagnostics.log(applicationContext, "service.rotation.skip_busy")
-                } else {
-                    Diagnostics.log(
-                        applicationContext,
-                        "service.rotation.success",
-                        fields = mapOf(
-                            "destinations" to outcome.destinations.joinToString(","),
-                            "wallhavenIds" to outcome.wallhavenIds.joinToString(",")
-                        )
-                    )
-                }
-            } catch (failure: Throwable) {
-                Diagnostics.log(
-                    applicationContext,
-                    "service.rotation.failure",
-                    level = "ERROR",
-                    throwable = failure
-                )
-            } finally {
-                rotationInFlight.set(false)
-                handler.post { scheduleFromGate() }
-            }
+            )
+            RotationScheduler.preloadIfNeeded(appContext)
+        } catch (failure: Throwable) {
+            Diagnostics.log(
+                appContext,
+                "service.rotation.failure",
+                level = "ERROR",
+                fields = mapOf("source" to "alarm_manager"),
+                throwable = failure
+            )
         }
     }
 
-    private fun scheduleFromGate() {
-        val settings = SettingsRepository(applicationContext).load()
-        if (!settings.enabled) {
-            stopSelf()
-            return
-        }
-        val dueAt = AutoRotationGate.ensureInitialized(applicationContext, settings.intervalMinutes)
-        updateNotification(dueAt)
-        scheduleAt(dueAt)
+    private fun finishService(startId: Int) {
+        releaseWakeLock()
+        stopSelf(startId)
     }
 
-    private fun scheduleAt(dueAtMs: Long) {
-        handler.removeCallbacks(wakeRunnable)
-        val delay = max(1_000L, dueAtMs - System.currentTimeMillis())
-        handler.postDelayed(wakeRunnable, delay)
-        RotationServiceStatus.heartbeat(applicationContext, dueAtMs)
+    private fun acquireWakeLock() {
+        val power = getSystemService(PowerManager::class.java)
+        wakeLock = power.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "${BuildConfig.APPLICATION_ID}:wallpaper-rotation"
+        ).apply {
+            setReferenceCounted(false)
+            acquire(WAKE_LOCK_TIMEOUT_MS)
+        }
+    }
+
+    private fun releaseWakeLock() {
+        val lock = wakeLock
+        if (lock != null && lock.isHeld) runCatching { lock.release() }
+        wakeLock = null
     }
 
     private fun promoteToForeground() {
-        val notification = buildNotification(AutoRotationGate.nextDueAt(applicationContext))
+        val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(
                 NOTIFICATION_ID,
@@ -170,12 +168,7 @@ class RotationForegroundService : Service() {
         }
     }
 
-    private fun updateNotification(dueAtMs: Long) {
-        getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification(dueAtMs))
-    }
-
-    private fun buildNotification(dueAtMs: Long): Notification {
+    private fun buildNotification(): Notification {
         val openIntent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -183,11 +176,6 @@ class RotationForegroundService : Service() {
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val text = if (dueAtMs > 0L) {
-            "Rotation automatique active • prochaine vers ${DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(dueAtMs))}"
-        } else {
-            "Rotation automatique active"
-        }
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
         } else {
@@ -197,7 +185,7 @@ class RotationForegroundService : Service() {
         return builder
             .setSmallIcon(R.drawable.ic_stat_wallpaper)
             .setContentTitle("Wallhaven Rotator")
-            .setContentText(text)
+            .setContentText("Rotation automatique en cours…")
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -207,25 +195,30 @@ class RotationForegroundService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val manager = getSystemService(NotificationManager::class.java)
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Rotation automatique",
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = "Maintient la rotation de fond d'écran active en arrière-plan."
-            setShowBadge(false)
-        }
-        manager.createNotificationChannel(channel)
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_ID,
+                "Rotation automatique",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Affichée brièvement pendant une rotation automatique."
+                setShowBadge(false)
+            }
+        )
     }
 
     companion object {
+        private const val ACTION_RUN_ALARM =
+            "fr.tadikwa.wallhavenrotator.action.RUN_ALARM_ROTATION"
         private const val CHANNEL_ID = "wallhaven_rotation_service"
         private const val NOTIFICATION_ID = 2401
+        private const val WAKE_LOCK_TIMEOUT_MS = 120_000L
 
-        fun start(context: Context) {
+        fun startForAlarm(context: Context) {
             val appContext = context.applicationContext
-            val intent = Intent(appContext, RotationForegroundService::class.java)
+            val intent = Intent(appContext, RotationForegroundService::class.java).apply {
+                action = ACTION_RUN_ALARM
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 appContext.startForegroundService(intent)
             } else {
@@ -245,7 +238,6 @@ object RotationServiceStatus {
     private const val PREFS = "wallhaven_rotation_service_status"
     private const val KEY_RUNNING = "running"
     private const val KEY_HEARTBEAT = "heartbeat_ms"
-    private const val KEY_DUE_AT = "due_at_ms"
 
     fun setRunning(context: Context, running: Boolean) {
         prefs(context).edit()
@@ -254,17 +246,9 @@ object RotationServiceStatus {
             .apply()
     }
 
-    fun heartbeat(context: Context, dueAtMs: Long) {
-        prefs(context).edit()
-            .putBoolean(KEY_RUNNING, true)
-            .putLong(KEY_HEARTBEAT, System.currentTimeMillis())
-            .putLong(KEY_DUE_AT, dueAtMs)
-            .apply()
-    }
-
     fun summary(context: Context): String {
         val p = prefs(context)
-        return "running=${p.getBoolean(KEY_RUNNING, false)},heartbeatMs=${p.getLong(KEY_HEARTBEAT, 0L)},dueAtMs=${p.getLong(KEY_DUE_AT, 0L)}"
+        return "running=${p.getBoolean(KEY_RUNNING, false)},lastStateChangeMs=${p.getLong(KEY_HEARTBEAT, 0L)},mode=one_shot_alarm"
     }
 
     private fun prefs(context: Context) =

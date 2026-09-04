@@ -1,19 +1,17 @@
-## 0.1.0-alpha.10
+## 0.1.0-alpha.11
 
-Background scheduling hardening based on the alpha.8 on-device diagnostics.
+System-alarm scheduler for HONOR/MagicOS background reliability.
 
-- Builds on the alpha.9 source already present on main; phones still on alpha.8 can install alpha.10 directly after validation
-- Replace stale periodic WorkManager generations on settings Save with `CANCEL_AND_REENQUEUE`
-- Add a persisted next-due gate shared by WorkManager and the foreground service so delayed OEM jobs can never replay several missed rotations in a burst
-- Add a `specialUse` foreground rotation service while automatic rotation is enabled, with a low-priority persistent notification, to keep cadence alive on aggressive OEM background managers such as HONOR/MagicOS
-- Keep WorkManager periodic rotation as a durable fallback; foreground-service and WorkManager triggers race through the same persisted gate so only one may rotate
-- Add a non-blocking automatic rotation path: if a visible transition is already active, later automatic triggers skip instead of queueing another transition
-- Manual "Change now" defers the next automatic due time by the configured interval and interrupts/cancels cache preloading first
-- Preload in two phases: warm one image per active destination before building the 8-image reserves
-- Make running preloads cooperatively interruptible between searches, metadata checks and downloads
-- Recover the automatic service/schedule after device boot and after in-place package replacement
-- Add scheduler diagnostics: WorkManager generation/next schedule, persisted next-due gate, foreground-service heartbeat, claim/skip reasons
-- Preserve the validated HONOR independent Home/Lock compatibility path
-- Fix a Strict-filter regression exposed by diagnostics: `big boobs`/breast tags were not in the alpha.8 exact block set; bump the cache policy version so those older cached candidates are discarded
+- Replace the long-lived Handler-timed foreground service with a system-owned AlarmManager deadline.
+- Use `setExactAndAllowWhileIdle()` when Android grants the user-facing `SCHEDULE_EXACT_ALARM` special access.
+- Fall back to `setAndAllowWhileIdle()` when exact-alarm access is unavailable, while retaining WorkManager as a second fallback.
+- Add an explicit alarm BroadcastReceiver so Android can recreate the app process after MagicOS has killed it.
+- Launch a short-lived foreground service only while a due wallpaper rotation is actually running, then stop it.
+- Hold a bounded partial wake lock during that one rotation so the CPU cannot fall asleep mid-apply.
+- Keep the persistent due gate: AlarmManager and WorkManager share the same claim and cannot create catch-up bursts.
+- Re-arm AlarmManager after manual changes, WorkManager fallback claims, boot/package replacement and exact-alarm permission changes.
+- On Save, open Android's “Alarms & reminders” special-access screen when exact alarms are not yet allowed.
+- Extend diagnostics with exact-alarm permission, scheduled mode and due time.
+- Preserve alpha.10 cache warming/manual priority, Strict policy v4 and HONOR independent Home/Lock workaround.
 
-The foreground service is intentional: Android requires a visible foreground-service notification for long-lived background execution. WorkManager remains the fallback for process/service recovery and deferred execution.
+Root cause observed on the HONOR MTN-NX1M: the alpha.10 foreground service process disappeared while backgrounded; no in-process Handler callback could fire. WorkManager then ran only when the app process became active again. AlarmManager moves the deadline into the Android system process instead of relying on our app remaining alive.

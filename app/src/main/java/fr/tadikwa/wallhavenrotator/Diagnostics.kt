@@ -132,6 +132,7 @@ object Diagnostics {
             appendLine()
             appendLine("[Scheduler]")
             appendLine("gate=${AutoRotationGate.statusSummary(appContext)}")
+            appendLine("alarm=${RotationAlarmScheduler.statusSummary(appContext)}")
             appendLine("foregroundService=${RotationServiceStatus.summary(appContext)}")
             appendLine()
             appendLine("[WorkManager]")

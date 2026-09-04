@@ -1,5 +1,6 @@
 package fr.tadikwa.wallhavenrotator
 
+import android.app.AlarmManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -7,14 +8,26 @@ import android.content.Intent
 class SchedulerRecoveryReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         val action = intent?.action ?: return
-        if (action != Intent.ACTION_BOOT_COMPLETED && action != Intent.ACTION_MY_PACKAGE_REPLACED) return
+        val appContext = context.applicationContext
+        val settings = SettingsRepository(appContext).load()
 
-        val settings = SettingsRepository(context.applicationContext).load()
         Diagnostics.log(
-            context.applicationContext,
+            appContext,
             "scheduler.recovery.broadcast",
-            fields = mapOf("action" to action, "enabled" to settings.enabled)
+            fields = mapOf(
+                "action" to action,
+                "enabled" to settings.enabled,
+                "exactAlarmAllowed" to RotationAlarmScheduler.canScheduleExact(appContext)
+            )
         )
-        RotationScheduler.recoverAfterSystemEvent(context.applicationContext, settings, action)
+
+        when (action) {
+            Intent.ACTION_BOOT_COMPLETED,
+            Intent.ACTION_MY_PACKAGE_REPLACED ->
+                RotationScheduler.recoverAfterSystemEvent(appContext, settings, action)
+
+            AlarmManager.ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED ->
+                RotationScheduler.exactAlarmPermissionChanged(appContext, settings)
+        }
     }
 }
