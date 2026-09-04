@@ -62,6 +62,7 @@ object RotationScheduler {
                 "nextDueAtMs" to nextDueAt,
                 "workPolicy" to "CANCEL_AND_REENQUEUE",
                 "alarmMode" to alarm.mode,
+                "alarmScheduleId" to alarm.scheduleId,
                 "exactAlarmAllowed" to alarm.exactAllowed,
                 "reason" to reason
             )
@@ -70,7 +71,7 @@ object RotationScheduler {
 
     /**
      * Opening the UI repairs/migrates the scheduler without postponing an existing
-     * deadline. Alpha.11 also re-registers the system AlarmManager trigger because
+     * deadline. Alpha.13 also re-registers the versioned system AlarmManager trigger because
      * those alarms live outside our process and survive MagicOS process cleanup.
      */
     fun reconcile(context: Context, settings: AppSettings) {
@@ -94,7 +95,7 @@ object RotationScheduler {
                     "toVersion" to AutoRotationGate.CONFIG_VERSION
                 )
             )
-            configure(appContext, settings, reason = "alpha11_migration")
+            configure(appContext, settings, reason = "alpha13_migration")
             return
         }
 
@@ -114,6 +115,7 @@ object RotationScheduler {
                 "nextDueAtMs" to dueAt,
                 "intervalMinutes" to minutes,
                 "alarmMode" to alarm.mode,
+                "alarmScheduleId" to alarm.scheduleId,
                 "exactAlarmAllowed" to alarm.exactAllowed
             )
         )
@@ -135,6 +137,7 @@ object RotationScheduler {
             fields = mapOf(
                 "exactAlarmAllowed" to alarm.exactAllowed,
                 "alarmMode" to alarm.mode,
+                "alarmScheduleId" to alarm.scheduleId,
                 "dueAtMs" to alarm.dueAtMs
             )
         )
@@ -160,17 +163,34 @@ object RotationScheduler {
 
     fun requestManualPriority(context: Context, intervalMinutes: Long) {
         val appContext = context.applicationContext
+        val manager = WorkManager.getInstance(appContext)
         val generation = PreloadControl.interrupt()
-        WorkManager.getInstance(appContext).cancelUniqueWork(PRELOAD_NAME)
-        val nextDue = AutoRotationGate.deferAfterManual(appContext, intervalMinutes)
+        manager.cancelUniqueWork(PRELOAD_NAME)
+
+        val minutes = AutoRotationPolicy.normalizeIntervalMinutes(intervalMinutes)
+        val nextDue = AutoRotationGate.deferAfterManual(appContext, minutes)
+
+        // A manual rotation defines the beginning of a fresh cadence. Rebuild the
+        // WorkManager fallback here directly instead of calling configure() first; the
+        // old alpha.11 path scheduled two AlarmManager deadlines a few milliseconds
+        // apart, which made stale vendor deliveries harder to reason about.
+        manager.enqueueUniquePeriodicWork(
+            PERIODIC_NAME,
+            ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE,
+            periodicRequest(minutes, AutoRotationPolicy.intervalMillis(minutes))
+        )
+        AutoRotationGate.markConfigVersion(appContext)
         val alarm = RotationAlarmScheduler.schedule(appContext, nextDue)
+
         Diagnostics.log(
             appContext,
             "scheduler.manual_priority",
             fields = mapOf(
                 "preloadGeneration" to generation,
                 "nextAutomaticDueAtMs" to nextDue,
-                "alarmMode" to alarm.mode
+                "workPolicy" to "CANCEL_AND_REENQUEUE",
+                "alarmMode" to alarm.mode,
+                "alarmScheduleId" to alarm.scheduleId
             )
         )
     }

@@ -40,7 +40,7 @@ Android companion to **Wallhaven Rotator**, built around the public SFW Wallhave
   - configurable global disk cap: 100 / 250 / 500 MiB (250 MiB default)
   - automatic orphan/obsolete-pool cleanup and manual **Clear cache** action
   - refill stops near the disk budget instead of repeatedly downloading and immediately evicting images
-- WorkManager periodic rotation at 15 min, 30 min, 1 h, 3 h, 6 h, 12 h or 24 h
+- AlarmManager-owned automatic rotation deadlines at 15 min, 30 min, 1 h, 3 h, 6 h, 12 h or 24 h, with WorkManager fallback
 - Manual "Change now"
 - Center-crop and downsample before applying the wallpaper to limit memory pressure
 - GitHub Releases OTA update support with SHA-256, package and signing-certificate validation
@@ -58,13 +58,13 @@ Images are downloaded into app-private storage. Once an image is successfully ap
 
 ## Suggestive-content filtering
 
-Wallhaven Rotator always requests SFW results. An additional local, per-profile filter can append tag exclusions to the Wallhaven query:
+Wallhaven Rotator always requests SFW results, then applies a second local metadata/category pass per profile:
 
-- **Standard**: no additional exclusions beyond Wallhaven SFW;
-- **Reduced**: excludes high-signal clothing/content tags such as cleavage, lingerie, underwear, panties, bikini/swimsuit and similar tags;
-- **Strict**: extends that exclusion list further using only Wallhaven's documented single-token `-tagname` syntax; it may hide more otherwise-SFW wallpapers.
+- **Standard**: no additional filtering beyond Wallhaven SFW;
+- **Reduced**: removes explicit adult/suggestive tags while keeping ordinary female/anime subjects possible;
+- **Strict**: deliberately fails closed. Explicit sexual/exposure tags are rejected, female-focused metadata is rejected, weak suggestive cues accumulate a risk score, and ambiguous/sparsely tagged **Anime** or **People** wallpapers are rejected unless their metadata clearly identifies a male subject or (for Anime) a non-human/scenery/object subject.
 
-This is a tag-based best-effort filter, not image recognition. Its effectiveness depends on Wallhaven tagging. User-entered search terms are kept and combined with the selected filter, except exact `id:<tag-id>` searches because Wallhaven documents them as non-combinable.
+Strict intentionally favours false positives. This is still metadata/category-driven rather than image recognition, so it cannot mathematically guarantee that a badly classified wallpaper will never slip through; the fail-closed Anime/People rules are specifically meant to reduce that risk when Wallhaven tags are sparse. User-entered search terms are kept and combined with the selected filter, except exact `id:<tag-id>` searches because Wallhaven documents them as non-combinable.
 
 ## OTA updates
 
@@ -85,7 +85,7 @@ The first published alpha (`0.1.0-alpha.1`) is CI debug-signed. It cannot be upg
 
 ## Android scheduling caveat
 
-WorkManager periodic work has a minimum repeat interval of 15 minutes. Android may defer background execution because of Doze, battery optimizations or vendor-specific scheduling. The interval is therefore a requested minimum cadence, not a real-time timer.
+Automatic deadlines are kept in Android `AlarmManager` so the app process does not need to remain alive. Each deadline has a versioned PendingIntent identity; stale vendor deliveries are detected and cannot consume the current cadence. If an alarm arrives a few minutes before the durable gate, Wallhaven Rotator temporarily stays awake until the real deadline instead of scheduling another allow-while-idle alarm immediately. WorkManager remains a secondary fallback. Android/OEM power policy can still introduce some timing variance.
 
 ## Build
 

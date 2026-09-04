@@ -245,9 +245,9 @@ class WallpaperCache(private val context: Context) {
                         )
                         break
                     }
-                    val tags = try {
+                    val metadata = try {
                         metadataChecks += 1
-                        client.tags(item.id)
+                        client.metadata(item.id)
                     } catch (failure: Throwable) {
                         lastFailure = failure
                         if (shouldAbortRefill(failure)) {
@@ -267,20 +267,29 @@ class WallpaperCache(private val context: Context) {
                         if (abortRefill) break else continue
                     }
                     if (stopRequested()) break
-                    val blocked = ContentFilterPolicy.blockedTags(tags, profile.contentFilter)
+                    val tags = metadata.tags
+                    val decision = ContentFilterPolicy.evaluate(
+                        wallhavenCategory = metadata.category,
+                        tags = tags,
+                        mode = profile.contentFilter
+                    )
                     Diagnostics.log(
                         context,
                         "content.metadata_checked",
                         fields = mapOf(
                             "pool" to poolKey,
                             "wallhavenId" to item.id,
+                            "wallhavenCategory" to decision.category,
                             "contentFilter" to profile.contentFilter.name,
                             "tagCount" to tags.size,
                             "tags" to tags.joinToString(",").take(1500),
-                            "blockedTags" to blocked.joinToString(",")
+                            "strictScore" to decision.score,
+                            "blockedTags" to decision.blockedTags.joinToString(","),
+                            "filterReasons" to decision.reasons.joinToString("|").take(1500),
+                            "accepted" to decision.allowed
                         )
                     )
-                    if (blocked.isNotEmpty()) {
+                    if (!decision.allowed) {
                         contentRejected += 1
                         continue
                     }

@@ -15,6 +15,11 @@ class WallhavenClient {
         val lastPage: Int
     )
 
+    data class WallpaperMetadata(
+        val category: String,
+        val tags: List<String>
+    )
+
     fun search(
         profile: ProfileSettings,
         orientation: ResolvedOrientation,
@@ -52,11 +57,11 @@ class WallhavenClient {
     }
 
     /**
-     * Fetch the real tag list for a wallpaper. Search listings do not include tags,
-     * while the wallpaper-info endpoint does. Filtered modes use this for a local
-     * second pass instead of trying to express an ever-growing blacklist in q=.
+     * The detail endpoint already has to be called for filtered modes because search
+     * listings do not carry the full tag list. Alpha.13 consumes its category so
+     * Strict can fail closed on ambiguous Anime/People results without an extra request.
      */
-    fun tags(wallpaperId: String): List<String> {
+    fun metadata(wallpaperId: String): WallpaperMetadata {
         val connection = open(
             "https://wallhaven.cc/api/v1/w/$wallpaperId",
             apiRequest = true
@@ -64,19 +69,29 @@ class WallhavenClient {
         try {
             val body = connection.inputStream.bufferedReader().use { it.readText() }
             val data = JSONObject(body).getJSONObject("data")
-            val tags = data.optJSONArray("tags") ?: return emptyList()
-            return buildList {
-                for (i in 0 until tags.length()) {
-                    val tag = tags.optJSONObject(i) ?: continue
-                    tag.optString("name")
-                        .takeIf { it.isNotBlank() }
-                        ?.let(::add)
+            val tagsJson = data.optJSONArray("tags")
+            val tags = if (tagsJson == null) {
+                emptyList()
+            } else {
+                buildList {
+                    for (i in 0 until tagsJson.length()) {
+                        val tag = tagsJson.optJSONObject(i) ?: continue
+                        tag.optString("name")
+                            .takeIf { it.isNotBlank() }
+                            ?.let(::add)
+                    }
                 }
             }
+            return WallpaperMetadata(
+                category = data.optString("category", ""),
+                tags = tags
+            )
         } finally {
             connection.disconnect()
         }
     }
+
+    fun tags(wallpaperId: String): List<String> = metadata(wallpaperId).tags
 
     fun download(item: WallhavenItem, destination: File) {
         val connection = open(item.path, apiRequest = false)

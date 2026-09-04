@@ -18,7 +18,11 @@ class RotationAlarmReceiver : BroadcastReceiver() {
         val appContext = context.applicationContext
         val settings = SettingsRepository(appContext).load()
         val now = System.currentTimeMillis()
-        val dueAt = AutoRotationGate.nextDueAt(appContext)
+        val gateDueAt = AutoRotationGate.nextDueAt(appContext)
+        val invocation = RotationAlarmScheduler.invocation(intent)
+        val currentAlarm = RotationAlarmScheduler.currentSnapshot(appContext)
+        val invocationIsCurrent = RotationAlarmScheduler.isCurrent(appContext, invocation)
+        val decision = AlarmDispatchPolicy.decide(now, gateDueAt, invocationIsCurrent)
 
         Diagnostics.log(
             appContext,
@@ -26,7 +30,15 @@ class RotationAlarmReceiver : BroadcastReceiver() {
             fields = mapOf(
                 "enabled" to settings.enabled,
                 "nowMs" to now,
-                "dueAtMs" to dueAt,
+                "gateDueAtMs" to gateDueAt,
+                "invocationScheduleId" to invocation.scheduleId,
+                "invocationDueAtMs" to invocation.scheduledDueAtMs,
+                "currentScheduleId" to currentAlarm.scheduleId,
+                "currentAlarmDueAtMs" to currentAlarm.dueAtMs,
+                "invocationIsCurrent" to invocationIsCurrent,
+                "dispatchAction" to decision.action.name,
+                "dispatchReason" to decision.reason,
+                "remainingMs" to decision.remainingMs,
                 "exactAllowed" to RotationAlarmScheduler.canScheduleExact(appContext)
             )
         )
@@ -36,22 +48,63 @@ class RotationAlarmReceiver : BroadcastReceiver() {
             return
         }
 
-        runCatching {
-            RotationForegroundService.startForAlarm(appContext)
-        }.onFailure { failure ->
-            // Exact alarms are exempt from background FGS start restrictions, but keep
-            // a durable WorkManager escape hatch for vendor-specific failures.
-            Diagnostics.log(
-                appContext,
-                "alarm.rotation.service_start_failure",
-                level = "ERROR",
-                throwable = failure
-            )
-            WorkManager.getInstance(appContext).enqueueUniqueWork(
-                "wallhaven_alarm_fallback",
-                ExistingWorkPolicy.REPLACE,
-                OneTimeWorkRequestBuilder<RotationWorker>().build()
-            )
+        when (decision.action) {
+            AlarmDispatchAction.IGNORE_STALE -> {
+                Diagnostics.log(
+                    appContext,
+                    "alarm.rotation.stale_ignored",
+                    fields = mapOf(
+                        "scheduleId" to invocation.scheduleId,
+                        "currentScheduleId" to currentAlarm.scheduleId,
+                        "remainingMs" to decision.remainingMs,
+                        "reason" to decision.reason
+                    )
+                )
+                return
+            }
+
+            AlarmDispatchAction.RESCHEDULE_CURRENT -> {
+                val alarm = RotationAlarmScheduler.schedule(appContext, gateDueAt)
+                Diagnostics.log(
+                    appContext,
+                    "alarm.rotation.current_rescheduled",
+                    fields = mapOf(
+                        "remainingMs" to decision.remainingMs,
+                        "scheduleId" to alarm.scheduleId,
+                        "dueAtMs" to alarm.dueAtMs,
+                        "mode" to alarm.mode
+                    )
+                )
+                return
+            }
+
+            AlarmDispatchAction.RUN_NOW,
+            AlarmDispatchAction.WAIT_THEN_RUN -> {
+                runCatching {
+                    RotationForegroundService.startForAlarm(
+                        context = appContext,
+                        targetDueAtMs = gateDueAt,
+                        wakeScheduleId = currentAlarm.scheduleId,
+                        wakeReason = decision.reason
+                    )
+                }.onFailure { failure ->
+                    Diagnostics.log(
+                        appContext,
+                        "alarm.rotation.service_start_failure",
+                        level = "ERROR",
+                        fields = mapOf(
+                            "targetDueAtMs" to gateDueAt,
+                            "wakeReason" to decision.reason
+                        ),
+                        throwable = failure
+                    )
+                    WorkManager.getInstance(appContext).enqueueUniqueWork(
+                        "wallhaven_alarm_fallback",
+                        ExistingWorkPolicy.REPLACE,
+                        OneTimeWorkRequestBuilder<RotationWorker>().build()
+                    )
+                }
+            }
         }
     }
 }

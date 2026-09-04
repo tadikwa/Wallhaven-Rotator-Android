@@ -16,86 +16,135 @@ class ContentFilterPolicyTest {
     }
 
     @Test
-    fun filteredModesKeepAnimeQueryBroadEnoughForMetadataFallback() {
-        val reduced = ContentFilterPolicy.compose("+anime", ContentFilterMode.REDUCED)
-        val strict = ContentFilterPolicy.compose("+anime", ContentFilterMode.STRICT)
-        assertTrue(reduced.contains("+anime"))
-        assertTrue(reduced.contains("-cleavage"))
-        assertTrue(reduced.contains("-schoolgirl"))
-        assertTrue(reduced.contains("-loli"))
-        assertFalse(reduced.contains("-anime"))
-        assertEquals(reduced, strict)
-    }
-
-    @Test
-    fun reducedRejectsObservedAdultTagsButKeepsOrdinaryAnimeGirls() {
-        val observedAdult = ContentFilterPolicy.blockedTags(
-            listOf("women", "Tori Black", "pornstar", "Tushy", "portrait display"),
+    fun reducedKeepsOrdinaryFemaleAnimeButRejectsExplicitAdultTags() {
+        val neutral = ContentFilterPolicy.evaluate(
+            "anime",
+            listOf("anime", "anime girls", "blue hair", "fan art"),
             ContentFilterMode.REDUCED
         )
-        assertTrue(observedAdult.contains("pornstar"))
-        assertTrue(observedAdult.contains("Tushy"))
+        assertTrue(neutral.allowed)
 
-        assertTrue(
-            ContentFilterPolicy.blockedTags(
-                listOf("anime", "anime girls", "blue hair", "fan art"),
-                ContentFilterMode.REDUCED
-            ).isEmpty()
+        val adult = ContentFilterPolicy.evaluate(
+            "people",
+            listOf("women", "pornstar", "Tushy", "portrait display"),
+            ContentFilterMode.REDUCED
+        )
+        assertFalse(adult.allowed)
+        assertTrue(adult.blockedTags.any { it.equals("pornstar", true) })
+    }
+
+    @Test
+    fun strictRejectsSparseAnimeMetadataFailClosed() {
+        // Mirrors the real failure mode seen on-device: visually female/suggestive art
+        // can be tagged only as samurai/armor/sword. Category=anime must carry enough
+        // trustworthy metadata to pass Strict.
+        val decision = ContentFilterPolicy.evaluate(
+            "anime",
+            listOf("samurai", "armor", "sword"),
+            ContentFilterMode.STRICT
+        )
+        assertFalse(decision.allowed)
+        assertTrue(decision.reasons.contains("strict:anime_unclassified"))
+    }
+
+    @Test
+    fun strictRejectsSparseGeneralHumanCharacterMetadata() {
+        val decision = ContentFilterPolicy.evaluate(
+            "general",
+            listOf("samurai", "armor", "sword"),
+            ContentFilterMode.STRICT
+        )
+        assertFalse(decision.allowed)
+        assertTrue(decision.reasons.contains("strict:general_human_unclassified"))
+    }
+
+    @Test
+    fun strictAllowsExplicitMaleAnime() {
+        val decision = ContentFilterPolicy.evaluate(
+            "anime",
+            listOf("Solo Leveling", "Sung Jin Woo", "anime", "anime boys"),
+            ContentFilterMode.STRICT
+        )
+        assertTrue(decision.allowed)
+    }
+
+    @Test
+    fun strictAllowsClearlyNonHumanAnimeScenery() {
+        val decision = ContentFilterPolicy.evaluate(
+            "anime",
+            listOf("mecha", "robot", "space art", "portrait display"),
+            ContentFilterMode.STRICT
+        )
+        assertTrue(decision.allowed)
+    }
+
+    @Test
+    fun strictRejectsFemaleFocusedGeneralAndAnime() {
+        assertFalse(
+            ContentFilterPolicy.evaluate(
+                "general",
+                listOf("women", "portrait display", "digital art"),
+                ContentFilterMode.STRICT
+            ).allowed
+        )
+        assertFalse(
+            ContentFilterPolicy.evaluate(
+                "anime",
+                listOf("anime", "anime girls", "flowers"),
+                ContentFilterMode.STRICT
+            ).allowed
         )
     }
 
     @Test
-    fun strictRejectsFemaleFocusedSubjectsEvenWithoutSexualTags() {
-        assertTrue(
-            ContentFilterPolicy.blockedTags(
-                listOf("anime", "anime girls", "Hololive", "blue hair"),
-                ContentFilterMode.STRICT
-            ).contains("anime girls")
+    fun strictPeopleRequiresExplicitMaleSubject() {
+        val unknown = ContentFilterPolicy.evaluate(
+            "people",
+            listOf("portrait display", "studio", "fashion"),
+            ContentFilterMode.STRICT
         )
-        assertTrue(
-            ContentFilterPolicy.blockedTags(
-                listOf("Cuban women", "actress", "portrait display"),
-                ContentFilterMode.STRICT
-            ).isNotEmpty()
+        assertFalse(unknown.allowed)
+        assertTrue(unknown.reasons.contains("strict:people_unclassified"))
+
+        val male = ContentFilterPolicy.evaluate(
+            "people",
+            listOf("men", "portrait display", "studio"),
+            ContentFilterMode.STRICT
         )
-        assertTrue(
-            ContentFilterPolicy.blockedTags(
-                listOf("video game girls", "Arknights", "flowers"),
-                ContentFilterMode.STRICT
-            ).contains("video game girls")
-        )
+        assertTrue(male.allowed)
     }
 
     @Test
-    fun strictKeepsNonFemaleAnimeAndScenery() {
-        assertTrue(
-            ContentFilterPolicy.blockedTags(
-                listOf("Solo Leveling", "Sung Jin Woo", "anime", "anime boys"),
-                ContentFilterMode.STRICT
-            ).isEmpty()
+    fun strictHardBlocksExposureVariantsInsideLongerTags() {
+        val decision = ContentFilterPolicy.evaluate(
+            "general",
+            listOf("black stockings", "upskirt", "portrait display"),
+            ContentFilterMode.STRICT
         )
-        assertTrue(
-            ContentFilterPolicy.blockedTags(
-                listOf("Chinese dragon", "rice fields", "artwork"),
-                ContentFilterMode.STRICT
-            ).isEmpty()
-        )
+        assertFalse(decision.allowed)
+        assertTrue(decision.blockedTags.any { it.equals("upskirt", true) })
     }
 
     @Test
-    fun strictBlocksObservedAssAndStockingsTags() {
-        assertTrue(
-            ContentFilterPolicy.blockedTags(
-                listOf("Genshin Impact", "anime girls", "ass"),
-                ContentFilterMode.STRICT
-            ).contains("ass")
+    fun strictRiskScoreRejectsCombinedWeakSignals() {
+        val decision = ContentFilterPolicy.evaluate(
+            "general",
+            listOf("kneeling", "bare shoulders", "parted lips", "portrait display"),
+            ContentFilterMode.STRICT
         )
-        assertTrue(
-            ContentFilterPolicy.blockedTags(
-                listOf("anime", "stockings", "wings"),
-                ContentFilterMode.STRICT
-            ).contains("stockings")
+        assertFalse(decision.allowed)
+        assertTrue(decision.score >= 4)
+        assertTrue(decision.reasons.any { it.startsWith("strict:risk_score=") })
+    }
+
+    @Test
+    fun strictKeepsNeutralGeneralScenery() {
+        val decision = ContentFilterPolicy.evaluate(
+            "general",
+            listOf("waterfall", "moss", "nature", "portrait display"),
+            ContentFilterMode.STRICT
         )
+        assertTrue(decision.allowed)
     }
 
     @Test
@@ -117,16 +166,5 @@ class ContentFilterPolicyTest {
             ResolvedOrientation.PORTRAIT
         )
         assertNotEquals(standard, strict)
-    }
-
-    @Test
-    fun strictRejectsAdultBodyTagsObservedInDiagnostics() {
-        val blocked = ContentFilterPolicy.blockedTags(
-            listOf("chromatic aberration", "big boobs", "bodysuit", "sensual gaze"),
-            ContentFilterMode.STRICT
-        )
-        assertTrue(blocked.contains("big boobs"))
-        assertTrue(blocked.contains("bodysuit"))
-        assertTrue(blocked.contains("sensual gaze"))
     }
 }

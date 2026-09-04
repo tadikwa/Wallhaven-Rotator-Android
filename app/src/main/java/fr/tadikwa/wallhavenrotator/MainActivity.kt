@@ -237,12 +237,11 @@ class MainActivity : ComponentActivity() {
                             repository.save(snapshot)
                             manualRotationState = ManualRotationUiState.Running
 
-                            // "Changer maintenant" also persists the edited settings. If
-                            // automatic rotation is enabled, rebuild one clean schedule from
-                            // this point so the next automatic transition cannot arrive right
-                            // behind the manual one.
+                            // "Changer maintenant" also persists edited settings. In
+                            // alpha.13 manual priority itself rebuilds one clean periodic
+                            // fallback and one versioned AlarmManager deadline, avoiding the
+                            // double schedule that alpha.11 created here.
                             if (snapshot.enabled) {
-                                RotationScheduler.configure(context, snapshot, reason = "manual_change")
                                 RotationScheduler.requestManualPriority(context, snapshot.intervalMinutes)
                             } else {
                                 RotationScheduler.configure(context, snapshot, reason = "manual_change_disabled")

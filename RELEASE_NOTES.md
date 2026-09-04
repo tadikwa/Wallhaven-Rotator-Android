@@ -1,17 +1,25 @@
-## 0.1.0-alpha.11
+## 0.1.0-alpha.13
 
-System-alarm scheduler for HONOR/MagicOS background reliability.
+Versioned AlarmManager delivery + fail-closed Strict content filtering.
 
-- Replace the long-lived Handler-timed foreground service with a system-owned AlarmManager deadline.
-- Use `setExactAndAllowWhileIdle()` when Android grants the user-facing `SCHEDULE_EXACT_ALARM` special access.
-- Fall back to `setAndAllowWhileIdle()` when exact-alarm access is unavailable, while retaining WorkManager as a second fallback.
-- Add an explicit alarm BroadcastReceiver so Android can recreate the app process after MagicOS has killed it.
-- Launch a short-lived foreground service only while a due wallpaper rotation is actually running, then stop it.
-- Hold a bounded partial wake lock during that one rotation so the CPU cannot fall asleep mid-apply.
-- Keep the persistent due gate: AlarmManager and WorkManager share the same claim and cannot create catch-up bursts.
-- Re-arm AlarmManager after manual changes, WorkManager fallback claims, boot/package replacement and exact-alarm permission changes.
-- On Save, open Android's “Alarms & reminders” special-access screen when exact alarms are not yet allowed.
-- Extend diagnostics with exact-alarm permission, scheduled mode and due time.
-- Preserve alpha.10 cache warming/manual priority, Strict policy v4 and HONOR independent Home/Lock workaround.
+### Background rotation reliability
 
-Root cause observed on the HONOR MTN-NX1M: the alpha.10 foreground service process disappeared while backgrounded; no in-process Handler callback could fire. WorkManager then ran only when the app process became active again. AlarmManager moves the deadline into the Android system process instead of relying on our app remaining alive.
+- Give every AlarmManager deadline a persisted unique schedule ID and encode it in the PendingIntent identity.
+- Cancel the legacy unversioned alpha.11 alarm during every new schedule, and cancel the previous versioned identity before replacing a deadline.
+- Detect stale AlarmManager broadcasts instead of treating every `AUTO_ROTATION_ALARM` as the currently active deadline.
+- Reuse an early/stale wake-up when the durable gate is less than four minutes away: a short foreground service + bounded wake lock waits until the real due time and then rotates, instead of attempting a second `setExactAndAllowWhileIdle()` inside Android's idle-alarm quota.
+- Ignore stale alarms that are far from the real deadline; implausibly early current alarms are re-registered.
+- Remove the double AlarmManager schedule previously produced by **Change now** (`configure()` followed immediately by manual deferral). Manual priority now rebuilds the WorkManager fallback and schedules exactly one alarm.
+- Bump the scheduler configuration version to 13 so alpha.13 performs one clean migration from the alpha.11 alarm identity.
+- Expand diagnostics with alarm schedule IDs, stale/current classification, remaining time, early-wait lifecycle and wake reason.
+
+### Strict filtering
+
+- Include the alpha.12 Strict policy v5 changes so users can jump directly from alpha.11 to alpha.13.
+- Discard older Strict cache pools automatically.
+- Keep Standard and Reduced behavior unchanged.
+- Strict fails closed for female-focused metadata and ambiguous/sparse Anime or People subjects.
+- Add hard sexual/exposure concepts plus a weighted score for weaker suggestive cues.
+- Record Wallhaven category, Strict score and exact rejection reasons in diagnostics.
+
+The background fix targets the observed HONOR trace where an AlarmManager broadcast arrived about 108 seconds before the newer durable gate. Android also documents a roughly nine-minute minimum dispatch interval for allow-while-idle alarms while Doze is active, so simply scheduling another allow-while-idle alarm a minute later is not a reliable correction path.
