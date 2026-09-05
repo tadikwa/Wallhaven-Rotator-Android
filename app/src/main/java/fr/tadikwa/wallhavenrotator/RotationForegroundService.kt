@@ -18,9 +18,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Short-lived service for an interactive, due automatic rotation.
  *
- * Alpha.17 is the only automatic WallpaperManager owner. WorkManager only repairs
- * AlarmManager and never writes a wallpaper. Automatic writes use the lightweight
- * encoded-stream path while this foreground service owns a bounded partial wake lock.
+ * Alpha.18 keeps the alpha.17 single-owner model: WorkManager only repairs AlarmManager
+ * and never writes a wallpaper. Automatic writes use the proven bitmap transport while
+ * this foreground service owns a bounded partial wake lock.
  */
 class RotationForegroundService : Service() {
     private val executor = Executors.newSingleThreadExecutor { runnable ->
@@ -41,7 +41,7 @@ class RotationForegroundService : Service() {
         Diagnostics.log(
             applicationContext,
             "service.rotation.created",
-            fields = mapOf("mode" to "interactive_stream_alarm_v17")
+            fields = mapOf("mode" to "interactive_bitmap_alarm_v18")
         )
     }
 
@@ -56,7 +56,7 @@ class RotationForegroundService : Service() {
             fields = mapOf(
                 "startId" to startId,
                 "action" to action,
-                "mode" to "interactive_stream_alarm_v17",
+                "mode" to "interactive_bitmap_alarm_v18",
                 "wakeScheduleId" to wakeScheduleId,
                 "wakeReason" to wakeReason,
                 "interactive" to BackgroundExecutionState.snapshot(applicationContext).interactive
@@ -103,7 +103,7 @@ class RotationForegroundService : Service() {
         Diagnostics.log(
             applicationContext,
             "service.rotation.destroyed",
-            fields = mapOf("mode" to "interactive_stream_alarm_v17")
+            fields = mapOf("mode" to "interactive_bitmap_alarm_v18")
         )
         super.onDestroy()
     }
@@ -382,7 +382,7 @@ object RotationServiceStatus {
 
     fun summary(context: Context): String {
         val p = prefs(context)
-        return "running=${p.getBoolean(KEY_RUNNING, false)},lastStateChangeMs=${p.getLong(KEY_HEARTBEAT, 0L)},mode=interactive_stream_alarm_v17"
+        return "running=${p.getBoolean(KEY_RUNNING, false)},lastStateChangeMs=${p.getLong(KEY_HEARTBEAT, 0L)},mode=interactive_bitmap_alarm_v18"
     }
 
     private fun prefs(context: Context) =

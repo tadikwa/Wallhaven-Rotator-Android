@@ -1,3 +1,11 @@
+# 0.1.0-alpha.18
+
+- Roll back the automatic `WallpaperManager.setStream()` transport introduced in alpha.17 after HONOR/MagicOS reverted both Home and Lock to the OEM default wallpapers after a background apply.
+- Restore the alpha.16 `setBitmap()` transport for automatic Home/Lock writes, including the proven HONOR order: Lock candidate to SYSTEM|LOCK, then immediate Home restore to SYSTEM.
+- Keep alpha.17's single automatic owner: only the exact-alarm foreground service may call WallpaperManager; WorkManager only repairs/reschedules AlarmManager.
+- Keep unlocked/interactive gating, five-minute deferred checks, five-minute partial wake lock, two-minute stuck-Binder process fail-safe, monotonic cadence and success-only cadence commit.
+- Preserve Strict v5 filtering and all cache behavior.
+
 # 0.1.0-alpha.17
 
 - Automatic wallpaper writes now have a single owner: the exact-alarm foreground service. WorkManager only repairs/reschedules AlarmManager and never calls WallpaperManager.
