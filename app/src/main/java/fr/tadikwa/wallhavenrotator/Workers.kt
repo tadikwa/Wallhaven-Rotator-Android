@@ -48,18 +48,23 @@ class RotationWorker(appContext: Context, params: WorkerParameters) : Worker(app
             }
         }
 
-        // WorkManager is fallback-only. Never call WallpaperManager while the device is
-        // sleeping, and never consume the cadence gate in that state.
-        if (!BackgroundExecutionState.isInteractive(applicationContext)) {
+        // WorkManager is fallback-only. Never call WallpaperManager until the device
+        // is interactive and fully unlocked, and never consume the cadence gate otherwise.
+        val executionState = BackgroundExecutionState.snapshot(applicationContext)
+        if (!executionState.readyForAutomaticWallpaper) {
             val deferred = RotationAlarmScheduler.scheduleDeferredUntilAwake(applicationContext)
             Diagnostics.log(
                 applicationContext,
-                "worker.rotation.deferred_sleeping",
+                "worker.rotation.deferred_not_ready",
                 fields = mapOf(
                     "attempt" to runAttemptCount,
                     "gateDueElapsedMs" to AutoRotationGate.nextDueAt(applicationContext),
                     "deferredTriggerElapsedMs" to deferred.triggerAtMs,
-                    "mode" to deferred.mode
+                    "mode" to deferred.mode,
+                    "interactive" to executionState.interactive,
+                    "deviceLocked" to executionState.deviceLocked,
+                    "keyguardLocked" to executionState.keyguardLocked,
+                    "deferReason" to executionState.reason
                 )
             )
             return Result.success()
@@ -109,6 +114,23 @@ class RotationWorker(appContext: Context, params: WorkerParameters) : Worker(app
                             "dueElapsedMs" to attempt.dueAtMs,
                             "remainingMs" to attempt.remainingMs,
                             "reason" to attempt.reason
+                        )
+                    )
+                }
+
+                is AutomaticRotationAttempt.Deferred -> {
+                    val deferred = RotationAlarmScheduler.scheduleDeferredUntilAwake(applicationContext)
+                    Diagnostics.log(
+                        applicationContext,
+                        "worker.rotation.deferred_during_apply",
+                        fields = mapOf(
+                            "attempt" to runAttemptCount,
+                            "reason" to attempt.reason,
+                            "phase" to attempt.phase,
+                            "interactive" to attempt.executionState.interactive,
+                            "deviceLocked" to attempt.executionState.deviceLocked,
+                            "keyguardLocked" to attempt.executionState.keyguardLocked,
+                            "deferredTriggerElapsedMs" to deferred.triggerAtMs
                         )
                     )
                 }

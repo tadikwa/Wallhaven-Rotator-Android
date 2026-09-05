@@ -1,3 +1,11 @@
+# 0.1.0-alpha.16
+
+- Automatic WallpaperManager writes now require the display to be interactive AND the device/keyguard to be unlocked.
+- Re-check readiness after bitmap preparation, immediately before WallpaperManager Binder calls.
+- Preserve the overdue cadence when the device locks during preparation; defer instead of treating it as a failed run.
+- Automatic HONOR pair writes no longer call getWallpaperId before/after the two required setBitmap calls.
+- Keep alpha.15 monotonic elapsedRealtime scheduling, sleep deferral, success-only cadence commit and Strict v5 filtering.
+
 ## 0.1.0-alpha.15
 
 Sleep-safe automatic rotation and monotonic cadence hardening for HONOR/MagicOS.

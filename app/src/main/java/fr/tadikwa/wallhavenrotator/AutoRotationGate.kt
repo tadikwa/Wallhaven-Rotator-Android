@@ -53,7 +53,7 @@ object AutoRotationPolicy {
 }
 
 object AutoRotationGate {
-    const val CONFIG_VERSION = 15
+    const val CONFIG_VERSION = 16
 
     private const val PREFS = "wallhaven_rotation_scheduler"
     private const val KEY_NEXT_DUE_AT = "next_due_elapsed_ms"

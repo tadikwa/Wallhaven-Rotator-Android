@@ -91,7 +91,7 @@ object RotationScheduler {
                     "clock" to "elapsedRealtime"
                 )
             )
-            configure(appContext, settings, reason = "alpha15_sleep_safe_migration")
+            configure(appContext, settings, reason = "alpha16_unlocked_safe_migration")
             return
         }
 

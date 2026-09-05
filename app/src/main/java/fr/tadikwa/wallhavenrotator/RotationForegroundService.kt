@@ -17,8 +17,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Short-lived service for an interactive, due automatic rotation.
  *
- * Alpha.15 never waits in this service and never enters WallpaperManager while the
- * device is non-interactive. The durable cadence is committed only by RotationEngine
+ * Alpha.16 never waits in this service and never enters WallpaperManager until the
+ * device is interactive and fully unlocked. The durable cadence is committed only by RotationEngine
  * after a successful transition.
  */
 class RotationForegroundService : Service() {
@@ -55,7 +55,7 @@ class RotationForegroundService : Service() {
                 "mode" to "interactive_elapsed_alarm_v15",
                 "wakeScheduleId" to wakeScheduleId,
                 "wakeReason" to wakeReason,
-                "interactive" to BackgroundExecutionState.isInteractive(applicationContext)
+                "interactive" to BackgroundExecutionState.snapshot(applicationContext).interactive
             )
         )
 
@@ -112,17 +112,23 @@ class RotationForegroundService : Service() {
             return
         }
 
-        // Race protection: the screen may have gone off after the receiver ran.
-        if (!BackgroundExecutionState.isInteractive(appContext)) {
+        // Race protection: automatic WallpaperManager calls are allowed only after
+        // the display is interactive AND the keyguard/device lock is gone.
+        val executionState = BackgroundExecutionState.snapshot(appContext)
+        if (!executionState.readyForAutomaticWallpaper) {
             val deferred = RotationAlarmScheduler.scheduleDeferredUntilAwake(appContext)
             Diagnostics.log(
                 appContext,
-                "service.rotation.deferred_sleeping",
+                "service.rotation.deferred_not_ready",
                 fields = mapOf(
                     "wakeScheduleId" to wakeScheduleId,
                     "wakeReason" to wakeReason,
                     "gateDueElapsedMs" to AutoRotationGate.nextDueAt(appContext),
-                    "deferredTriggerElapsedMs" to deferred.triggerAtMs
+                    "deferredTriggerElapsedMs" to deferred.triggerAtMs,
+                    "interactive" to executionState.interactive,
+                    "deviceLocked" to executionState.deviceLocked,
+                    "keyguardLocked" to executionState.keyguardLocked,
+                    "deferReason" to executionState.reason
                 )
             )
             return
@@ -163,6 +169,22 @@ class RotationForegroundService : Service() {
                             "dueElapsedMs" to attempt.dueAtMs,
                             "remainingMs" to attempt.remainingMs,
                             "reason" to attempt.reason
+                        )
+                    )
+                }
+
+                is AutomaticRotationAttempt.Deferred -> {
+                    val deferred = RotationAlarmScheduler.scheduleDeferredUntilAwake(appContext)
+                    Diagnostics.log(
+                        appContext,
+                        "service.rotation.deferred_during_apply",
+                        fields = mapOf(
+                            "reason" to attempt.reason,
+                            "phase" to attempt.phase,
+                            "interactive" to attempt.executionState.interactive,
+                            "deviceLocked" to attempt.executionState.deviceLocked,
+                            "keyguardLocked" to attempt.executionState.keyguardLocked,
+                            "deferredTriggerElapsedMs" to deferred.triggerAtMs
                         )
                     )
                 }

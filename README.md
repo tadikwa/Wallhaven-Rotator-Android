@@ -131,3 +131,5 @@ See [SECURITY.md](SECURITY.md) for OTA verification details.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+> Alpha 16: automatic writes are deferred until the phone is interactive and fully unlocked; the cadence is committed only after a successful wallpaper change.

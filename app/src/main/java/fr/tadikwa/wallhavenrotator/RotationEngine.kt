@@ -34,6 +34,12 @@ sealed interface AutomaticRotationAttempt {
         val reason: String
     ) : AutomaticRotationAttempt
 
+    data class Deferred(
+        val reason: String,
+        val phase: String,
+        val executionState: BackgroundExecutionSnapshot
+    ) : AutomaticRotationAttempt
+
     data object Busy : AutomaticRotationAttempt
 }
 
@@ -98,6 +104,27 @@ object RotationEngine {
         }
 
         try {
+            val initialExecutionState = BackgroundExecutionState.snapshot(appContext)
+            if (!initialExecutionState.readyForAutomaticWallpaper) {
+                Diagnostics.log(
+                    appContext,
+                    "rotation.automatic.deferred_not_ready",
+                    fields = mapOf(
+                        "source" to source,
+                        "phase" to "before_eligibility",
+                        "interactive" to initialExecutionState.interactive,
+                        "deviceLocked" to initialExecutionState.deviceLocked,
+                        "keyguardLocked" to initialExecutionState.keyguardLocked,
+                        "reason" to initialExecutionState.reason
+                    )
+                )
+                return AutomaticRotationAttempt.Deferred(
+                    reason = initialExecutionState.reason,
+                    phase = "before_eligibility",
+                    executionState = initialExecutionState
+                )
+            }
+
             val eligibility = AutoRotationGate.inspectDue(
                 context = appContext,
                 intervalMinutes = settings.intervalMinutes,
@@ -137,6 +164,25 @@ object RotationEngine {
                     appContext = appContext,
                     settings = settings,
                     deepApplyDiagnostics = false
+                )
+            } catch (deferred: AutomaticWallpaperApplyDeferredException) {
+                Diagnostics.log(
+                    appContext,
+                    "rotation.automatic.deferred_during_apply",
+                    fields = mapOf(
+                        "source" to source,
+                        "dueElapsedMs" to eligibility.dueAtMs,
+                        "phase" to deferred.phase,
+                        "interactive" to deferred.executionState.interactive,
+                        "deviceLocked" to deferred.executionState.deviceLocked,
+                        "keyguardLocked" to deferred.executionState.keyguardLocked,
+                        "reason" to deferred.executionState.reason
+                    )
+                )
+                return AutomaticRotationAttempt.Deferred(
+                    reason = deferred.executionState.reason,
+                    phase = deferred.phase,
+                    executionState = deferred.executionState
                 )
             } catch (failure: Throwable) {
                 Diagnostics.log(
@@ -197,6 +243,7 @@ object RotationEngine {
         val cache = WallpaperCache(appContext)
         val orientation = DeviceProfile.resolveOrientation(appContext, settings.orientationMode)
 
+        val executionState = BackgroundExecutionState.snapshot(appContext)
         Diagnostics.log(
             appContext,
             "rotation.start",
@@ -205,7 +252,10 @@ object RotationEngine {
                 "orientation" to orientation.name,
                 "cacheFiles" to cache.countAll(),
                 "deepApplyDiagnostics" to deepApplyDiagnostics,
-                "interactive" to BackgroundExecutionState.isInteractive(appContext)
+                "interactive" to executionState.interactive,
+                "deviceLocked" to executionState.deviceLocked,
+                "keyguardLocked" to executionState.keyguardLocked,
+                "readyForWallpaper" to executionState.readyForAutomaticWallpaper
             )
         )
 

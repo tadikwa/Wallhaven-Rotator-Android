@@ -26,7 +26,7 @@ class RotationAlarmReceiver : BroadcastReceiver() {
         val invocation = RotationAlarmScheduler.invocation(intent)
         val currentAlarm = RotationAlarmScheduler.currentSnapshot(appContext)
         val invocationIsCurrent = RotationAlarmScheduler.isCurrent(appContext, invocation)
-        val interactive = BackgroundExecutionState.isInteractive(appContext)
+        val executionState = BackgroundExecutionState.snapshot(appContext)
         val decision = AlarmDispatchPolicy.decide(nowElapsed, gateDueAt, invocationIsCurrent)
 
         Diagnostics.log(
@@ -35,7 +35,10 @@ class RotationAlarmReceiver : BroadcastReceiver() {
             fields = mapOf(
                 "clock" to "elapsedRealtime",
                 "enabled" to settings.enabled,
-                "interactive" to interactive,
+                "interactive" to executionState.interactive,
+                "deviceLocked" to executionState.deviceLocked,
+                "keyguardLocked" to executionState.keyguardLocked,
+                "readyForWallpaper" to executionState.readyForAutomaticWallpaper,
                 "nowElapsedMs" to nowElapsed,
                 "gateDueElapsedMs" to gateDueAt,
                 "invocationScheduleId" to invocation.scheduleId,
@@ -70,9 +73,9 @@ class RotationAlarmReceiver : BroadcastReceiver() {
         }
 
         // Critical HONOR/MagicOS rule learned from the overnight trace: setBitmap can
-        // block for minutes while the screen is off. Do not enter WallpaperManager at
+        // block for minutes while the device is asleep or still locked. Do not enter WallpaperManager at
         // all in that state, and do not consume the cadence gate.
-        if (!interactive) {
+        if (!executionState.readyForAutomaticWallpaper) {
             val deferred = RotationAlarmScheduler.scheduleDeferredUntilAwake(appContext)
             Diagnostics.log(
                 appContext,
@@ -82,7 +85,8 @@ class RotationAlarmReceiver : BroadcastReceiver() {
                     "gateOverdueMs" to (nowElapsed - gateDueAt).coerceAtLeast(0L),
                     "deferredScheduleId" to deferred.scheduleId,
                     "deferredTriggerElapsedMs" to deferred.triggerAtMs,
-                    "mode" to deferred.mode
+                    "mode" to deferred.mode,
+                    "deferReason" to executionState.reason
                 )
             )
             return
