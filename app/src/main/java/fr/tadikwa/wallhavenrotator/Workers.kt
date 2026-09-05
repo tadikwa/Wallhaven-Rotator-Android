@@ -48,8 +48,9 @@ class RotationWorker(appContext: Context, params: WorkerParameters) : Worker(app
             }
         }
 
-        // WorkManager is fallback-only. Never call WallpaperManager until the device
-        // is interactive and fully unlocked, and never consume the cadence gate otherwise.
+        // WorkManager is repair-only in alpha.17. It never owns WallpaperManager.
+        // A periodic/fallback wake only restores the system AlarmManager trigger; the
+        // exact-alarm receiver + foreground service remain the single automatic writer.
         val executionState = BackgroundExecutionState.snapshot(applicationContext)
         if (!executionState.readyForAutomaticWallpaper) {
             val deferred = RotationAlarmScheduler.scheduleDeferredUntilAwake(applicationContext)
@@ -70,105 +71,33 @@ class RotationWorker(appContext: Context, params: WorkerParameters) : Worker(app
             return Result.success()
         }
 
-        Diagnostics.log(
-            applicationContext,
-            "worker.rotation.start",
-            fields = mapOf(
-                "attempt" to runAttemptCount,
-                "target" to settings.targetMode.name,
-                "manual" to false
-            )
-        )
-
-        return try {
-            when (
-                val attempt = RotationEngine.tryRotateAutomaticDue(
-                    context = applicationContext,
-                    settings = settings,
-                    source = "workmanager",
-                    allowEarlyAlarmTolerance = false
-                )
-            ) {
-                is AutomaticRotationAttempt.Success -> {
-                    Diagnostics.log(
-                        applicationContext,
-                        "worker.rotation.success",
-                        fields = mapOf(
-                            "attempt" to runAttemptCount,
-                            "wallhavenIds" to attempt.outcome.wallhavenIds.joinToString(","),
-                            "nextDueElapsedMs" to attempt.nextDueAtMs,
-                            "cadenceCommitted" to attempt.cadenceCommitted
-                        )
-                    )
-                }
-
-                is AutomaticRotationAttempt.NotDue -> {
-                    if (attempt.dueAtMs > 0L) {
-                        RotationAlarmScheduler.schedule(applicationContext, attempt.dueAtMs)
-                    }
-                    Diagnostics.log(
-                        applicationContext,
-                        "worker.rotation.skipped_not_due",
-                        fields = mapOf(
-                            "attempt" to runAttemptCount,
-                            "dueElapsedMs" to attempt.dueAtMs,
-                            "remainingMs" to attempt.remainingMs,
-                            "reason" to attempt.reason
-                        )
-                    )
-                }
-
-                is AutomaticRotationAttempt.Deferred -> {
-                    val deferred = RotationAlarmScheduler.scheduleDeferredUntilAwake(applicationContext)
-                    Diagnostics.log(
-                        applicationContext,
-                        "worker.rotation.deferred_during_apply",
-                        fields = mapOf(
-                            "attempt" to runAttemptCount,
-                            "reason" to attempt.reason,
-                            "phase" to attempt.phase,
-                            "interactive" to attempt.executionState.interactive,
-                            "deviceLocked" to attempt.executionState.deviceLocked,
-                            "keyguardLocked" to attempt.executionState.keyguardLocked,
-                            "deferredTriggerElapsedMs" to deferred.triggerAtMs
-                        )
-                    )
-                }
-
-                AutomaticRotationAttempt.Busy -> {
-                    val watchdog = RotationAlarmScheduler.scheduleWatchdog(
-                        applicationContext,
-                        settings.intervalMinutes
-                    )
-                    Diagnostics.log(
-                        applicationContext,
-                        "worker.rotation.skipped_busy",
-                        fields = mapOf(
-                            "attempt" to runAttemptCount,
-                            "watchdogTriggerElapsedMs" to watchdog.triggerAtMs
-                        )
-                    )
-                }
-            }
-            Result.success()
-        } catch (failure: Throwable) {
-            val watchdog = RotationAlarmScheduler.scheduleWatchdog(
-                applicationContext,
-                settings.intervalMinutes
-            )
+        if (RotationServiceStatus.isLikelyRunning(applicationContext)) {
             Diagnostics.log(
                 applicationContext,
-                "worker.rotation.failure",
-                level = "ERROR",
-                fields = mapOf(
-                    "attempt" to runAttemptCount,
-                    "manual" to false,
-                    "watchdogTriggerElapsedMs" to watchdog.triggerAtMs
-                ),
-                throwable = failure
+                "worker.rotation.service_already_running",
+                fields = mapOf("attempt" to runAttemptCount)
             )
-            Result.success()
+            return Result.success()
         }
+
+        val dueAt = AutoRotationGate.ensureInitialized(
+            applicationContext,
+            settings.intervalMinutes
+        )
+        val alarm = RotationAlarmScheduler.schedule(applicationContext, dueAt)
+        Diagnostics.log(
+            applicationContext,
+            "worker.rotation.handoff_to_alarm",
+            fields = mapOf(
+                "attempt" to runAttemptCount,
+                "gateDueElapsedMs" to dueAt,
+                "alarmTriggerElapsedMs" to alarm.triggerAtMs,
+                "alarmScheduleId" to alarm.scheduleId,
+                "alarmMode" to alarm.mode,
+                "purpose" to alarm.purpose
+            )
+        )
+        return Result.success()
     }
 }
 

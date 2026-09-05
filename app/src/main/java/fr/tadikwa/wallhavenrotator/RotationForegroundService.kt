@@ -12,18 +12,22 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Short-lived service for an interactive, due automatic rotation.
  *
- * Alpha.16 never waits in this service and never enters WallpaperManager until the
- * device is interactive and fully unlocked. The durable cadence is committed only by RotationEngine
- * after a successful transition.
+ * Alpha.17 is the only automatic WallpaperManager owner. WorkManager only repairs
+ * AlarmManager and never writes a wallpaper. Automatic writes use the lightweight
+ * encoded-stream path while this foreground service owns a bounded partial wake lock.
  */
 class RotationForegroundService : Service() {
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "wallhaven-alarm-rotation")
+    }
+    private val timeoutExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "wallhaven-alarm-hard-timeout")
     }
     private val inFlight = AtomicBoolean(false)
     private var wakeLock: PowerManager.WakeLock? = null
@@ -37,7 +41,7 @@ class RotationForegroundService : Service() {
         Diagnostics.log(
             applicationContext,
             "service.rotation.created",
-            fields = mapOf("mode" to "interactive_elapsed_alarm_v15")
+            fields = mapOf("mode" to "interactive_stream_alarm_v17")
         )
     }
 
@@ -52,7 +56,7 @@ class RotationForegroundService : Service() {
             fields = mapOf(
                 "startId" to startId,
                 "action" to action,
-                "mode" to "interactive_elapsed_alarm_v15",
+                "mode" to "interactive_stream_alarm_v17",
                 "wakeScheduleId" to wakeScheduleId,
                 "wakeReason" to wakeReason,
                 "interactive" to BackgroundExecutionState.snapshot(applicationContext).interactive
@@ -94,11 +98,12 @@ class RotationForegroundService : Service() {
     override fun onDestroy() {
         releaseWakeLock()
         executor.shutdown()
+        timeoutExecutor.shutdownNow()
         RotationServiceStatus.setRunning(applicationContext, false)
         Diagnostics.log(
             applicationContext,
             "service.rotation.destroyed",
-            fields = mapOf("mode" to "interactive_elapsed_alarm_v15")
+            fields = mapOf("mode" to "interactive_stream_alarm_v17")
         )
         super.onDestroy()
     }
@@ -133,6 +138,27 @@ class RotationForegroundService : Service() {
             )
             return
         }
+
+        val hardTimeout = timeoutExecutor.schedule(
+            {
+                Diagnostics.log(
+                    appContext,
+                    "service.rotation.hard_timeout_process_restart",
+                    level = "ERROR",
+                    fields = mapOf(
+                        "source" to "alarm_manager",
+                        "timeoutMs" to APPLY_HARD_TIMEOUT_MS,
+                        "gateDueElapsedMs" to AutoRotationGate.nextDueAt(appContext)
+                    )
+                )
+                // WallpaperManager Binder calls are not interruptible. If an OEM leaves
+                // the call stuck, terminate only our process; the durable due gate and
+                // system-owned watchdog alarm survive and will retry later.
+                android.os.Process.killProcess(android.os.Process.myPid())
+            },
+            APPLY_HARD_TIMEOUT_MS,
+            TimeUnit.MILLISECONDS
+        )
 
         try {
             when (
@@ -216,6 +242,8 @@ class RotationForegroundService : Service() {
                 ),
                 throwable = failure
             )
+        } finally {
+            hardTimeout.cancel(false)
         }
     }
 
@@ -301,7 +329,8 @@ class RotationForegroundService : Service() {
         private const val EXTRA_WAKE_REASON = "wallhaven_wake_reason"
         private const val CHANNEL_ID = "wallhaven_rotation_service"
         private const val NOTIFICATION_ID = 2401
-        private const val WAKE_LOCK_TIMEOUT_MS = 60_000L
+        private const val WAKE_LOCK_TIMEOUT_MS = 5L * 60L * 1_000L
+        private const val APPLY_HARD_TIMEOUT_MS = 2L * 60L * 1_000L
 
         fun startForAlarm(
             context: Context,
@@ -333,6 +362,7 @@ object RotationServiceStatus {
     private const val PREFS = "wallhaven_rotation_service_status"
     private const val KEY_RUNNING = "running"
     private const val KEY_HEARTBEAT = "heartbeat_ms"
+    private const val RUNNING_FRESHNESS_MS = 10L * 60L * 1_000L
 
     fun setRunning(context: Context, running: Boolean) {
         prefs(context).edit()
@@ -341,9 +371,18 @@ object RotationServiceStatus {
             .apply()
     }
 
+    fun isLikelyRunning(context: Context): Boolean {
+        val p = prefs(context)
+        if (!p.getBoolean(KEY_RUNNING, false)) return false
+        val heartbeat = p.getLong(KEY_HEARTBEAT, 0L)
+        if (heartbeat <= 0L) return false
+        val ageMs = (System.currentTimeMillis() - heartbeat).coerceAtLeast(0L)
+        return ageMs <= RUNNING_FRESHNESS_MS
+    }
+
     fun summary(context: Context): String {
         val p = prefs(context)
-        return "running=${p.getBoolean(KEY_RUNNING, false)},lastStateChangeMs=${p.getLong(KEY_HEARTBEAT, 0L)},mode=interactive_elapsed_alarm_v15"
+        return "running=${p.getBoolean(KEY_RUNNING, false)},lastStateChangeMs=${p.getLong(KEY_HEARTBEAT, 0L)},mode=interactive_stream_alarm_v17"
     }
 
     private fun prefs(context: Context) =

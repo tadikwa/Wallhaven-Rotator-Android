@@ -1,3 +1,13 @@
+# 0.1.0-alpha.17
+
+- Automatic wallpaper writes now have a single owner: the exact-alarm foreground service. WorkManager only repairs/reschedules AlarmManager and never calls WallpaperManager.
+- Automatic writes use WallpaperManager.setStream() with a device-sized high-quality JPEG prepared before entering WallpaperManager, avoiding the setBitmap serialization path that stalled for minutes/hours on MagicOS.
+- Automatic HONOR writes perform no WallpaperManager Binder reads before or after apply; only the required Lock SYSTEM|LOCK stream followed immediately by Home SYSTEM stream.
+- Hold the foreground-service partial wake lock for up to five minutes while the encoded-stream apply is active.
+- Add a two-minute hard fail-safe for an OEM-stuck WallpaperManager Binder call: the app process is restarted while the persisted due gate and system watchdog alarm remain intact for retry.
+- Reduce sleeping deferred rechecks from one minute to five minutes.
+- Preserve alpha.16 unlocked-device gate, monotonic cadence, success-only cadence commit, HONOR independent-pair ordering and Strict v5 filtering.
+
 # 0.1.0-alpha.16
 
 - Automatic WallpaperManager writes now require the display to be interactive AND the device/keyguard to be unlocked.

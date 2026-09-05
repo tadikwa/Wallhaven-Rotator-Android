@@ -41,7 +41,7 @@ object RotationAlarmScheduler {
     const val PURPOSE_WATCHDOG = "watchdog"
     const val PURPOSE_DEFERRED_AWAKE = "deferred_until_awake"
 
-    private const val DEFERRED_RECHECK_DELAY_MS = 60_000L
+    private const val DEFERRED_RECHECK_DELAY_MS = 5L * 60L * 1_000L
 
     data class ScheduleResult(
         val triggerAtMs: Long,

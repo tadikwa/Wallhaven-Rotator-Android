@@ -28,6 +28,9 @@ object WallpaperApplier {
         orientation: ResolvedOrientation,
         deepDiagnostics: Boolean = false
     ): WallpaperApplyResult {
+        if (!deepDiagnostics) {
+            return applyStream(context, file, which, orientation)
+        }
         val destination = destinationLabel(which)
         requireAutomaticReady(context, deepDiagnostics, "before_prepare")
         val prepared = prepareBitmap(context, file, orientation)
@@ -115,6 +118,9 @@ object WallpaperApplier {
         orientation: ResolvedOrientation,
         deepDiagnostics: Boolean = false
     ): CombinedWallpaperApplyResult {
+        if (!deepDiagnostics) {
+            return applyCombinedStream(context, file, orientation)
+        }
         requireAutomaticReady(context, deepDiagnostics, "before_prepare")
         val prepared = prepareBitmap(context, file, orientation)
 
@@ -234,6 +240,14 @@ object WallpaperApplier {
         orientation: ResolvedOrientation,
         deepDiagnostics: Boolean = false
     ): CombinedWallpaperApplyResult {
+        if (!deepDiagnostics) {
+            return applyHonorIndependentPairStream(
+                context = context,
+                homeFile = homeFile,
+                lockFile = lockFile,
+                orientation = orientation
+            )
+        }
         requireAutomaticReady(context, deepDiagnostics, "before_prepare")
         val homePrepared = prepareBitmap(context, homeFile, orientation)
         val lockPrepared = try {
@@ -366,6 +380,298 @@ object WallpaperApplier {
         } finally {
             lockPrepared.bitmap.recycle()
             homePrepared.bitmap.recycle()
+        }
+    }
+
+    private data class PreparedWallpaperStream(
+        val file: File,
+        val width: Int,
+        val height: Int,
+        val format: String
+    )
+
+    /**
+     * Automatic transport for normal Home/Lock writes.
+     *
+     * The device-sized image is encoded before WallpaperManager is entered, then the
+     * already encoded JPEG/PNG is copied through setStream(). This avoids setBitmap's
+     * client-side bitmap serialization/compression path, which MagicOS has repeatedly
+     * stalled while the app was not visibly focused.
+     */
+    private fun applyStream(
+        context: Context,
+        sourceFile: File,
+        which: Int,
+        orientation: ResolvedOrientation
+    ): WallpaperApplyResult {
+        val destination = destinationLabel(which)
+        requireAutomaticReady(context, false, "before_stream_prepare")
+        val prepared = prepareWallpaperStream(context, sourceFile, orientation)
+        try {
+            requireAutomaticReady(context, false, "after_stream_prepare")
+            Diagnostics.log(
+                context,
+                "wallpaper.apply.start",
+                fields = mapOf(
+                    "destination" to destination,
+                    "file" to sourceFile.name,
+                    "bytes" to sourceFile.length(),
+                    "preparedBytes" to prepared.file.length(),
+                    "preparedFormat" to prepared.format,
+                    "orientation" to orientation.name,
+                    "beforeId" to -1,
+                    "deepDiagnostics" to false,
+                    "transport" to "setStream"
+                )
+            )
+            val manager = WallpaperManager.getInstance(context)
+            val returnedId = prepared.file.inputStream().buffered().use { stream ->
+                manager.setStream(stream, null, false, which)
+            }
+            if (returnedId <= 0) {
+                error("WallpaperManager a refusé le fond d'écran $destination (ID retourné : $returnedId)")
+            }
+            Diagnostics.log(
+                context,
+                "wallpaper.apply.success",
+                fields = mapOf(
+                    "destination" to destination,
+                    "returnedId" to returnedId,
+                    "beforeId" to -1,
+                    "afterId" to returnedId,
+                    "width" to prepared.width,
+                    "height" to prepared.height,
+                    "deepDiagnostics" to false,
+                    "transport" to "setStream"
+                )
+            )
+            return WallpaperApplyResult(destination, returnedId, -1, returnedId)
+        } catch (failure: Throwable) {
+            Diagnostics.log(
+                context,
+                "wallpaper.apply.failure",
+                level = "ERROR",
+                fields = mapOf(
+                    "destination" to destination,
+                    "beforeId" to -1,
+                    "deepDiagnostics" to false,
+                    "transport" to "setStream"
+                ),
+                throwable = failure
+            )
+            throw failure
+        } finally {
+            runCatching { prepared.file.delete() }
+        }
+    }
+
+    private fun applyCombinedStream(
+        context: Context,
+        sourceFile: File,
+        orientation: ResolvedOrientation
+    ): CombinedWallpaperApplyResult {
+        requireAutomaticReady(context, false, "before_stream_prepare")
+        val prepared = prepareWallpaperStream(context, sourceFile, orientation)
+        try {
+            requireAutomaticReady(context, false, "after_stream_prepare")
+            Diagnostics.log(
+                context,
+                "wallpaper.apply_combined.start",
+                fields = mapOf(
+                    "file" to sourceFile.name,
+                    "bytes" to sourceFile.length(),
+                    "preparedBytes" to prepared.file.length(),
+                    "preparedFormat" to prepared.format,
+                    "orientation" to orientation.name,
+                    "beforeHomeId" to -1,
+                    "beforeLockId" to -1,
+                    "deepDiagnostics" to false,
+                    "transport" to "setStream"
+                )
+            )
+            val manager = WallpaperManager.getInstance(context)
+            val returnedId = prepared.file.inputStream().buffered().use { stream ->
+                manager.setStream(
+                    stream,
+                    null,
+                    false,
+                    WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK
+                )
+            }
+            if (returnedId <= 0) {
+                error("WallpaperManager a refusé l'application combinée (ID retourné : $returnedId)")
+            }
+            Diagnostics.log(
+                context,
+                "wallpaper.apply_combined.success",
+                fields = mapOf(
+                    "returnedId" to returnedId,
+                    "beforeHomeId" to -1,
+                    "afterHomeId" to returnedId,
+                    "beforeLockId" to -1,
+                    "afterLockId" to returnedId,
+                    "width" to prepared.width,
+                    "height" to prepared.height,
+                    "deepDiagnostics" to false,
+                    "transport" to "setStream"
+                )
+            )
+            return CombinedWallpaperApplyResult(
+                home = WallpaperApplyResult("home-combined", returnedId, -1, returnedId),
+                lock = WallpaperApplyResult("lock", returnedId, -1, returnedId)
+            )
+        } catch (failure: Throwable) {
+            Diagnostics.log(
+                context,
+                "wallpaper.apply_combined.failure",
+                level = "ERROR",
+                fields = mapOf(
+                    "beforeHomeId" to -1,
+                    "beforeLockId" to -1,
+                    "deepDiagnostics" to false,
+                    "transport" to "setStream"
+                ),
+                throwable = failure
+            )
+            throw failure
+        } finally {
+            runCatching { prepared.file.delete() }
+        }
+    }
+
+    private fun applyHonorIndependentPairStream(
+        context: Context,
+        homeFile: File,
+        lockFile: File,
+        orientation: ResolvedOrientation
+    ): CombinedWallpaperApplyResult {
+        requireAutomaticReady(context, false, "before_stream_prepare")
+        val homePrepared = prepareWallpaperStream(context, homeFile, orientation)
+        val lockPrepared = try {
+            prepareWallpaperStream(context, lockFile, orientation)
+        } catch (failure: Throwable) {
+            runCatching { homePrepared.file.delete() }
+            throw failure
+        }
+
+        try {
+            requireAutomaticReady(context, false, "after_stream_prepare")
+            Diagnostics.log(
+                context,
+                "wallpaper.apply_honor_pair.start",
+                fields = mapOf(
+                    "homeFile" to homeFile.name,
+                    "lockFile" to lockFile.name,
+                    "homeBytes" to homeFile.length(),
+                    "lockBytes" to lockFile.length(),
+                    "preparedHomeBytes" to homePrepared.file.length(),
+                    "preparedLockBytes" to lockPrepared.file.length(),
+                    "preparedHomeFormat" to homePrepared.format,
+                    "preparedLockFormat" to lockPrepared.format,
+                    "orientation" to orientation.name,
+                    "beforeHomeId" to -1,
+                    "beforeLockId" to -1,
+                    "deepDiagnostics" to false,
+                    "transport" to "setStream"
+                )
+            )
+
+            val manager = WallpaperManager.getInstance(context)
+
+            // Keep the proven HONOR order. There are deliberately no Binder reads,
+            // readiness probes or diagnostics between these two writes.
+            val combinedId = lockPrepared.file.inputStream().buffered().use { stream ->
+                manager.setStream(
+                    stream,
+                    null,
+                    false,
+                    WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK
+                )
+            }
+            if (combinedId <= 0) {
+                error("WallpaperManager a refusé l'application combinée HONOR (ID retourné : $combinedId)")
+            }
+
+            val homeReturnedId = homePrepared.file.inputStream().buffered().use { stream ->
+                manager.setStream(
+                    stream,
+                    null,
+                    false,
+                    WallpaperManager.FLAG_SYSTEM
+                )
+            }
+            if (homeReturnedId <= 0) {
+                error("WallpaperManager a refusé la restauration du fond d'accueil (ID retourné : $homeReturnedId)")
+            }
+
+            Diagnostics.log(
+                context,
+                "wallpaper.apply_honor_pair.success",
+                fields = mapOf(
+                    "combinedId" to combinedId,
+                    "homeReturnedId" to homeReturnedId,
+                    "beforeHomeId" to -1,
+                    "afterHomeId" to homeReturnedId,
+                    "beforeLockId" to -1,
+                    "afterLockId" to combinedId,
+                    "width" to homePrepared.width,
+                    "height" to homePrepared.height,
+                    "deepDiagnostics" to false,
+                    "transport" to "setStream"
+                )
+            )
+
+            return CombinedWallpaperApplyResult(
+                home = WallpaperApplyResult("home", homeReturnedId, -1, homeReturnedId),
+                lock = WallpaperApplyResult("lock", combinedId, -1, combinedId)
+            )
+        } catch (failure: Throwable) {
+            Diagnostics.log(
+                context,
+                "wallpaper.apply_honor_pair.failure",
+                level = "ERROR",
+                fields = mapOf(
+                    "beforeHomeId" to -1,
+                    "beforeLockId" to -1,
+                    "deepDiagnostics" to false,
+                    "transport" to "setStream"
+                ),
+                throwable = failure
+            )
+            throw failure
+        } finally {
+            runCatching { lockPrepared.file.delete() }
+            runCatching { homePrepared.file.delete() }
+        }
+    }
+
+    private fun prepareWallpaperStream(
+        context: Context,
+        sourceFile: File,
+        orientation: ResolvedOrientation
+    ): PreparedWallpaperStream {
+        val prepared = prepareBitmap(context, sourceFile, orientation)
+        // Automatic wallpaper transport is intentionally normalized to a high-quality
+        // device-sized JPEG. This keeps the stream small and avoids expensive PNG
+        // encoding/decoding in the MagicOS wallpaper service.
+        val output = File.createTempFile("wallhaven-prepared-", ".jpg", context.cacheDir)
+        try {
+            output.outputStream().buffered().use { stream ->
+                if (!prepared.bitmap.compress(Bitmap.CompressFormat.JPEG, 96, stream)) {
+                    error("Impossible d'encoder le wallpaper préparé ${sourceFile.name}")
+                }
+            }
+            return PreparedWallpaperStream(
+                file = output,
+                width = prepared.width,
+                height = prepared.height,
+                format = "jpeg"
+            )
+        } catch (failure: Throwable) {
+            runCatching { output.delete() }
+            throw failure
+        } finally {
+            prepared.bitmap.recycle()
         }
     }
 
