@@ -14,36 +14,55 @@ class RotationWorker(appContext: Context, params: WorkerParameters) : Worker(app
             return Result.success()
         }
 
-        if (!manual) {
-            val claim = AutoRotationGate.claimIfDue(
-                applicationContext,
-                settings.intervalMinutes,
-                source = "workmanager"
-            )
+        if (manual) {
             Diagnostics.log(
                 applicationContext,
-                "worker.rotation.claim",
+                "worker.rotation.start",
                 fields = mapOf(
                     "attempt" to runAttemptCount,
-                    "allowed" to claim.allowed,
-                    "reason" to claim.reason,
-                    "previousDueAtMs" to claim.previousDueAtMs,
-                    "nextDueAtMs" to claim.nextDueAtMs,
-                    "target" to settings.targetMode.name
+                    "target" to settings.targetMode.name,
+                    "manual" to true
                 )
             )
-            // WorkManager is only a fallback in alpha.11, but whenever it wakes it
-            // also repairs the independent system AlarmManager deadline.
-            RotationAlarmScheduler.schedule(applicationContext, claim.nextDueAtMs)
-            if (!claim.allowed) {
+            return try {
+                val outcome = RotationEngine.rotateOnce(applicationContext, settings)
                 Diagnostics.log(
                     applicationContext,
-                    "worker.rotation.skipped_not_due",
-                    fields = mapOf("attempt" to runAttemptCount, "nextDueAtMs" to claim.nextDueAtMs)
+                    "worker.rotation.success",
+                    fields = mapOf(
+                        "attempt" to runAttemptCount,
+                        "wallhavenIds" to outcome.wallhavenIds.joinToString(","),
+                        "manual" to true
+                    )
                 )
-                return Result.success()
+                Result.success()
+            } catch (failure: Throwable) {
+                Diagnostics.log(
+                    applicationContext,
+                    "worker.rotation.failure",
+                    level = "ERROR",
+                    fields = mapOf("attempt" to runAttemptCount, "manual" to true),
+                    throwable = failure
+                )
+                Result.success()
             }
-            RotationScheduler.requestAutomaticPriority(applicationContext, "workmanager")
+        }
+
+        // WorkManager is fallback-only. Never call WallpaperManager while the device is
+        // sleeping, and never consume the cadence gate in that state.
+        if (!BackgroundExecutionState.isInteractive(applicationContext)) {
+            val deferred = RotationAlarmScheduler.scheduleDeferredUntilAwake(applicationContext)
+            Diagnostics.log(
+                applicationContext,
+                "worker.rotation.deferred_sleeping",
+                fields = mapOf(
+                    "attempt" to runAttemptCount,
+                    "gateDueElapsedMs" to AutoRotationGate.nextDueAt(applicationContext),
+                    "deferredTriggerElapsedMs" to deferred.triggerAtMs,
+                    "mode" to deferred.mode
+                )
+            )
+            return Result.success()
         }
 
         Diagnostics.log(
@@ -52,43 +71,80 @@ class RotationWorker(appContext: Context, params: WorkerParameters) : Worker(app
             fields = mapOf(
                 "attempt" to runAttemptCount,
                 "target" to settings.targetMode.name,
-                "manual" to manual
+                "manual" to false
             )
         )
 
         return try {
-            val outcome = if (manual) {
-                RotationEngine.rotateOnce(applicationContext, settings)
-            } else {
-                RotationEngine.tryRotateOnce(applicationContext, settings)
-            }
-            if (outcome == null) {
-                Diagnostics.log(
-                    applicationContext,
-                    "worker.rotation.skipped_busy",
-                    fields = mapOf("attempt" to runAttemptCount)
+            when (
+                val attempt = RotationEngine.tryRotateAutomaticDue(
+                    context = applicationContext,
+                    settings = settings,
+                    source = "workmanager",
+                    allowEarlyAlarmTolerance = false
                 )
-            } else {
-                Diagnostics.log(
-                    applicationContext,
-                    "worker.rotation.success",
-                    fields = mapOf(
-                        "attempt" to runAttemptCount,
-                        "wallhavenIds" to outcome.wallhavenIds.joinToString(",")
+            ) {
+                is AutomaticRotationAttempt.Success -> {
+                    Diagnostics.log(
+                        applicationContext,
+                        "worker.rotation.success",
+                        fields = mapOf(
+                            "attempt" to runAttemptCount,
+                            "wallhavenIds" to attempt.outcome.wallhavenIds.joinToString(","),
+                            "nextDueElapsedMs" to attempt.nextDueAtMs,
+                            "cadenceCommitted" to attempt.cadenceCommitted
+                        )
                     )
-                )
+                }
+
+                is AutomaticRotationAttempt.NotDue -> {
+                    if (attempt.dueAtMs > 0L) {
+                        RotationAlarmScheduler.schedule(applicationContext, attempt.dueAtMs)
+                    }
+                    Diagnostics.log(
+                        applicationContext,
+                        "worker.rotation.skipped_not_due",
+                        fields = mapOf(
+                            "attempt" to runAttemptCount,
+                            "dueElapsedMs" to attempt.dueAtMs,
+                            "remainingMs" to attempt.remainingMs,
+                            "reason" to attempt.reason
+                        )
+                    )
+                }
+
+                AutomaticRotationAttempt.Busy -> {
+                    val watchdog = RotationAlarmScheduler.scheduleWatchdog(
+                        applicationContext,
+                        settings.intervalMinutes
+                    )
+                    Diagnostics.log(
+                        applicationContext,
+                        "worker.rotation.skipped_busy",
+                        fields = mapOf(
+                            "attempt" to runAttemptCount,
+                            "watchdogTriggerElapsedMs" to watchdog.triggerAtMs
+                        )
+                    )
+                }
             }
             Result.success()
         } catch (failure: Throwable) {
+            val watchdog = RotationAlarmScheduler.scheduleWatchdog(
+                applicationContext,
+                settings.intervalMinutes
+            )
             Diagnostics.log(
                 applicationContext,
                 "worker.rotation.failure",
                 level = "ERROR",
-                fields = mapOf("attempt" to runAttemptCount, "manual" to manual),
+                fields = mapOf(
+                    "attempt" to runAttemptCount,
+                    "manual" to false,
+                    "watchdogTriggerElapsedMs" to watchdog.triggerAtMs
+                ),
                 throwable = failure
             )
-            // Never retry immediately. The persistent due gate and the foreground
-            // service/periodic fallback will provide the next opportunity.
             Result.success()
         }
     }
@@ -124,8 +180,6 @@ class PreloadWorker(appContext: Context, params: WorkerParameters) : Worker(appC
 
             val pools = activePools(settings, orientation)
 
-            // Phase 1: make every active destination usable first. On independent mode
-            // Home must not fill eight images before Lock has even one ready wallpaper.
             for (pool in pools) {
                 cache.refill(
                     poolKey = pool.key,
@@ -142,8 +196,6 @@ class PreloadWorker(appContext: Context, params: WorkerParameters) : Worker(appC
                 fields = mapOf("pools" to pools.size, "cacheFiles" to cache.countAll())
             )
 
-            // Phase 2: only after every destination has a ready image do we build the
-            // reserve pool. A manual request can interrupt this pass cooperatively.
             for (pool in pools) {
                 cache.refill(
                     poolKey = pool.key,
@@ -165,8 +217,6 @@ class PreloadWorker(appContext: Context, params: WorkerParameters) : Worker(appC
             if (shouldStop()) {
                 return interruptedResult(token, "exception_after_stop")
             }
-            // Do not create an automatic retry storm. A later save/rotation will enqueue
-            // another preload; manual rotation can still fetch one image on demand.
             Diagnostics.log(
                 applicationContext,
                 "worker.preload.failure",

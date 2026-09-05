@@ -1,25 +1,20 @@
-## 0.1.0-alpha.13
+## 0.1.0-alpha.15
 
-Versioned AlarmManager delivery + fail-closed Strict content filtering.
+Sleep-safe automatic rotation and monotonic cadence hardening for HONOR/MagicOS.
 
-### Background rotation reliability
+- Base automatic cadence on `SystemClock.elapsedRealtime()` and `AlarmManager.ELAPSED_REALTIME_WAKEUP` for relative "every N minutes" scheduling.
+- Never call `WallpaperManager` while the device is non-interactive. A due wake-up received with the screen off is converted to a non-wakeup elapsed alarm so delivery resumes after a natural device wake.
+- Keep the durable gate overdue while sleeping; missed sleeping intervals are not replayed and are not consumed.
+- Acquire the in-process rotation lock before inspecting the cadence gate. Busy automatic callers can no longer advance the schedule without changing a wallpaper.
+- Split automatic cadence into inspect -> apply -> commit. The next interval is persisted only after a successful wallpaper transition.
+- Arm a watchdog alarm before automatic app-owned work. If the process dies or `WallpaperManager` stalls, the same overdue gate is retried later rather than lost.
+- Preserve newer manual/settings deadlines if they change while an automatic transition is running.
+- Use a lightweight automatic wallpaper apply path: no transient deep color listeners, submitted-preview hashing/compression or deep snapshots during background rotations.
+- Keep the proven HONOR independent-pair order unchanged: Lock candidate to SYSTEM|LOCK, then immediate Home restore to SYSTEM.
+- WorkManager remains a fallback only. Its automatic path also defers while non-interactive and uses the same lock-before-gate / success-only-commit semantics.
+- Migrate and cancel the alpha.13 RTC alarm identity, then use versioned alpha.15 monotonic PendingIntents.
+- Preserve Strict content policy v5 and all alpha.13 filtering behavior.
 
-- Give every AlarmManager deadline a persisted unique schedule ID and encode it in the PendingIntent identity.
-- Cancel the legacy unversioned alpha.11 alarm during every new schedule, and cancel the previous versioned identity before replacing a deadline.
-- Detect stale AlarmManager broadcasts instead of treating every `AUTO_ROTATION_ALARM` as the currently active deadline.
-- Reuse an early/stale wake-up when the durable gate is less than four minutes away: a short foreground service + bounded wake lock waits until the real due time and then rotates, instead of attempting a second `setExactAndAllowWhileIdle()` inside Android's idle-alarm quota.
-- Ignore stale alarms that are far from the real deadline; implausibly early current alarms are re-registered.
-- Remove the double AlarmManager schedule previously produced by **Change now** (`configure()` followed immediately by manual deferral). Manual priority now rebuilds the WorkManager fallback and schedules exactly one alarm.
-- Bump the scheduler configuration version to 13 so alpha.13 performs one clean migration from the alpha.11 alarm identity.
-- Expand diagnostics with alarm schedule IDs, stale/current classification, remaining time, early-wait lifecycle and wake reason.
+### Root cause confirmed by overnight alpha.13 trace
 
-### Strict filtering
-
-- Include the alpha.12 Strict policy v5 changes so users can jump directly from alpha.11 to alpha.13.
-- Discard older Strict cache pools automatically.
-- Keep Standard and Reduced behavior unchanged.
-- Strict fails closed for female-focused metadata and ambiguous/sparse Anime or People subjects.
-- Add hard sexual/exposure concepts plus a weighted score for weaker suggestive cues.
-- Record Wallhaven category, Strict score and exact rejection reasons in diagnostics.
-
-The background fix targets the observed HONOR trace where an AlarmManager broadcast arrived about 108 seconds before the newer durable gate. Android also documents a roughly nine-minute minimum dispatch interval for allow-while-idle alarms while Doze is active, so simply scheduling another allow-while-idle alarm a minute later is not a reliable correction path.
+AlarmManager successfully woke the app without UI focus and changed wallpapers automatically while the device was usable. During long screen-off periods, however, HONOR's `WallpaperManager.setBitmap()` could block for many minutes. While that old transition held the rotation lock, subsequent alarm/WorkManager callers could still claim future cadence slots before discovering the engine was busy. Alpha.15 avoids entering WallpaperManager while non-interactive and advances cadence only after a successful transition.

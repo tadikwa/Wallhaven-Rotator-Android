@@ -5,7 +5,7 @@ import org.junit.Test
 
 class AlarmDispatchPolicyTest {
     @Test
-    fun dueAlarmRunsImmediately() {
+    fun dueCurrentAlarmRunsImmediately() {
         val decision = AlarmDispatchPolicy.decide(
             nowMs = 1_000_000L,
             gateDueAtMs = 999_000L,
@@ -15,21 +15,21 @@ class AlarmDispatchPolicyTest {
     }
 
     @Test
-    fun staleAlarmShortlyBeforeDueIsReusedInsteadOfRearmed() {
+    fun currentAlarmTwoMinutesEarlyRunsImmediately() {
         val decision = AlarmDispatchPolicy.decide(
             nowMs = 1_000_000L,
-            gateDueAtMs = 1_108_000L,
-            invocationIsCurrent = false
+            gateDueAtMs = 1_120_000L,
+            invocationIsCurrent = true
         )
-        assertEquals(AlarmDispatchAction.WAIT_THEN_RUN, decision.action)
-        assertEquals(108_000L, decision.remainingMs)
+        assertEquals(AlarmDispatchAction.RUN_NOW, decision.action)
+        assertEquals("current_early_accepted", decision.reason)
     }
 
     @Test
-    fun farStaleAlarmIsIgnored() {
+    fun staleAlarmIsAlwaysIgnoredEvenNearDue() {
         val decision = AlarmDispatchPolicy.decide(
             nowMs = 1_000_000L,
-            gateDueAtMs = 1_600_000L,
+            gateDueAtMs = 1_108_000L,
             invocationIsCurrent = false
         )
         assertEquals(AlarmDispatchAction.IGNORE_STALE, decision.action)

@@ -1,6 +1,7 @@
 package fr.tadikwa.wallhavenrotator
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
@@ -12,9 +13,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 
-/**
- * In-process cooperative stop signal for background preloads.
- */
 internal object PreloadControl {
     private val generation = AtomicLong(0L)
 
@@ -58,10 +56,12 @@ object RotationScheduler {
             appContext,
             "scheduler.periodic.configured",
             fields = mapOf(
+                "clock" to "elapsedRealtime",
                 "intervalMinutes" to minutes,
-                "nextDueAtMs" to nextDueAt,
+                "nextDueElapsedMs" to nextDueAt,
                 "workPolicy" to "CANCEL_AND_REENQUEUE",
                 "alarmMode" to alarm.mode,
+                "alarmPurpose" to alarm.purpose,
                 "alarmScheduleId" to alarm.scheduleId,
                 "exactAlarmAllowed" to alarm.exactAllowed,
                 "reason" to reason
@@ -69,11 +69,6 @@ object RotationScheduler {
         )
     }
 
-    /**
-     * Opening the UI repairs/migrates the scheduler without postponing an existing
-     * deadline. Alpha.13 also re-registers the versioned system AlarmManager trigger because
-     * those alarms live outside our process and survive MagicOS process cleanup.
-     */
     fun reconcile(context: Context, settings: AppSettings) {
         val appContext = context.applicationContext
         val manager = WorkManager.getInstance(appContext)
@@ -92,16 +87,17 @@ object RotationScheduler {
                 "scheduler.reconcile.migration",
                 fields = mapOf(
                     "fromVersion" to AutoRotationGate.configVersion(appContext),
-                    "toVersion" to AutoRotationGate.CONFIG_VERSION
+                    "toVersion" to AutoRotationGate.CONFIG_VERSION,
+                    "clock" to "elapsedRealtime"
                 )
             )
-            configure(appContext, settings, reason = "alpha13_migration")
+            configure(appContext, settings, reason = "alpha15_sleep_safe_migration")
             return
         }
 
         val minutes = AutoRotationPolicy.normalizeIntervalMinutes(settings.intervalMinutes)
         val dueAt = AutoRotationGate.ensureInitialized(appContext, minutes)
-        val initialDelay = max(0L, dueAt - System.currentTimeMillis())
+        val initialDelay = max(0L, dueAt - SystemClock.elapsedRealtime())
         manager.enqueueUniquePeriodicWork(
             PERIODIC_NAME,
             ExistingPeriodicWorkPolicy.KEEP,
@@ -112,9 +108,12 @@ object RotationScheduler {
             appContext,
             "scheduler.reconcile.ok",
             fields = mapOf(
-                "nextDueAtMs" to dueAt,
+                "clock" to "elapsedRealtime",
+                "nextDueElapsedMs" to dueAt,
+                "remainingMs" to initialDelay,
                 "intervalMinutes" to minutes,
                 "alarmMode" to alarm.mode,
+                "alarmPurpose" to alarm.purpose,
                 "alarmScheduleId" to alarm.scheduleId,
                 "exactAlarmAllowed" to alarm.exactAllowed
             )
@@ -123,6 +122,8 @@ object RotationScheduler {
 
     fun recoverAfterSystemEvent(context: Context, settings: AppSettings, action: String) {
         if (!settings.enabled) return
+        // elapsedRealtime resets at boot. Package replacement also gets one clean
+        // interval, which is preferable to carrying an ambiguous old wake-up identity.
         configure(context.applicationContext, settings, reason = "system:$action")
     }
 
@@ -135,10 +136,12 @@ object RotationScheduler {
             appContext,
             "scheduler.exact_alarm_permission_changed",
             fields = mapOf(
+                "clock" to "elapsedRealtime",
                 "exactAlarmAllowed" to alarm.exactAllowed,
                 "alarmMode" to alarm.mode,
+                "alarmPurpose" to alarm.purpose,
                 "alarmScheduleId" to alarm.scheduleId,
-                "dueAtMs" to alarm.dueAtMs
+                "triggerElapsedMs" to alarm.triggerAtMs
             )
         )
     }
@@ -170,10 +173,6 @@ object RotationScheduler {
         val minutes = AutoRotationPolicy.normalizeIntervalMinutes(intervalMinutes)
         val nextDue = AutoRotationGate.deferAfterManual(appContext, minutes)
 
-        // A manual rotation defines the beginning of a fresh cadence. Rebuild the
-        // WorkManager fallback here directly instead of calling configure() first; the
-        // old alpha.11 path scheduled two AlarmManager deadlines a few milliseconds
-        // apart, which made stale vendor deliveries harder to reason about.
         manager.enqueueUniquePeriodicWork(
             PERIODIC_NAME,
             ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE,
@@ -186,10 +185,12 @@ object RotationScheduler {
             appContext,
             "scheduler.manual_priority",
             fields = mapOf(
+                "clock" to "elapsedRealtime",
                 "preloadGeneration" to generation,
-                "nextAutomaticDueAtMs" to nextDue,
+                "nextAutomaticDueElapsedMs" to nextDue,
                 "workPolicy" to "CANCEL_AND_REENQUEUE",
                 "alarmMode" to alarm.mode,
+                "alarmPurpose" to alarm.purpose,
                 "alarmScheduleId" to alarm.scheduleId
             )
         )

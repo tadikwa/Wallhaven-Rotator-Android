@@ -85,7 +85,7 @@ The first published alpha (`0.1.0-alpha.1`) is CI debug-signed. It cannot be upg
 
 ## Android scheduling caveat
 
-Automatic deadlines are kept in Android `AlarmManager` so the app process does not need to remain alive. Each deadline has a versioned PendingIntent identity; stale vendor deliveries are detected and cannot consume the current cadence. If an alarm arrives a few minutes before the durable gate, Wallhaven Rotator temporarily stays awake until the real deadline instead of scheduling another allow-while-idle alarm immediately. WorkManager remains a secondary fallback. Android/OEM power policy can still introduce some timing variance.
+Automatic cadence uses `SystemClock.elapsedRealtime()` with `AlarmManager` so relative intervals are independent of wall-clock/time-zone changes. The application deliberately does **not** call `WallpaperManager` while the device is non-interactive: if a due alarm arrives while the screen is off, the durable deadline remains pending and Android is given a non-wakeup alarm that can resume after a natural device wake. Only one pending transition is applied; sleeping intervals are never replayed as a burst. WorkManager remains a secondary fallback and follows the same rule. Android/OEM power policy can still introduce timing variance.
 
 ## Build
 

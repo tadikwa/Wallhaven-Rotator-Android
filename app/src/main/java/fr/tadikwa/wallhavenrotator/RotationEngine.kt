@@ -19,17 +19,41 @@ data class RotationOutcome(
     }
 }
 
+sealed interface AutomaticRotationAttempt {
+    data class Success(
+        val outcome: RotationOutcome,
+        val previousDueAtMs: Long,
+        val nextDueAtMs: Long,
+        val earlyByMs: Long,
+        val cadenceCommitted: Boolean
+    ) : AutomaticRotationAttempt
+
+    data class NotDue(
+        val dueAtMs: Long,
+        val remainingMs: Long,
+        val reason: String
+    ) : AutomaticRotationAttempt
+
+    data object Busy : AutomaticRotationAttempt
+}
+
 object RotationEngine {
-    // Manual rotations wait for the current visible transition. Automatic callers use
-    // tryRotateOnce(): if another transition is already active they skip instead of
-    // building a backlog that later replays several wallpapers in a row.
+    // The execution lock is now acquired BEFORE the cadence gate is inspected. That is
+    // essential: a second automatic caller can no longer consume an interval while a
+    // previous WallpaperManager transition is still active.
     private val rotationLock = ReentrantLock()
 
+    /** Manual rotations wait for any current transition and keep deep diagnostics. */
     fun rotateOnce(context: Context, settings: AppSettings): RotationOutcome =
         rotationLock.withLock {
-            rotateOnceLocked(context.applicationContext, settings)
+            rotateOnceLocked(
+                appContext = context.applicationContext,
+                settings = settings,
+                deepApplyDiagnostics = true
+            )
         }
 
+    /** Legacy non-cadence try path retained for narrow callers/tests. */
     fun tryRotateOnce(context: Context, settings: AppSettings): RotationOutcome? {
         if (!rotationLock.tryLock()) {
             Diagnostics.log(
@@ -40,13 +64,136 @@ object RotationEngine {
             return null
         }
         return try {
-            rotateOnceLocked(context.applicationContext, settings)
+            rotateOnceLocked(
+                appContext = context.applicationContext,
+                settings = settings,
+                deepApplyDiagnostics = false
+            )
         } finally {
             rotationLock.unlock()
         }
     }
 
-    private fun rotateOnceLocked(appContext: Context, settings: AppSettings): RotationOutcome {
+    /**
+     * Atomic automatic path:
+     * 1) acquire rotation slot;
+     * 2) inspect due state without mutating it;
+     * 3) rotate using the lightweight WallpaperManager path;
+     * 4) only after success advance the durable cadence.
+     */
+    fun tryRotateAutomaticDue(
+        context: Context,
+        settings: AppSettings,
+        source: String,
+        allowEarlyAlarmTolerance: Boolean
+    ): AutomaticRotationAttempt {
+        val appContext = context.applicationContext
+        if (!rotationLock.tryLock()) {
+            Diagnostics.log(
+                appContext,
+                "rotation.automatic.busy",
+                fields = mapOf("source" to source, "target" to settings.targetMode.name)
+            )
+            return AutomaticRotationAttempt.Busy
+        }
+
+        try {
+            val eligibility = AutoRotationGate.inspectDue(
+                context = appContext,
+                intervalMinutes = settings.intervalMinutes,
+                allowEarlyAlarmTolerance = allowEarlyAlarmTolerance
+            )
+            Diagnostics.log(
+                appContext,
+                "rotation.automatic.eligibility",
+                fields = mapOf(
+                    "source" to source,
+                    "allowed" to eligibility.allowed,
+                    "reason" to eligibility.reason,
+                    "dueElapsedMs" to eligibility.dueAtMs,
+                    "remainingMs" to (eligibility.dueAtMs - eligibility.nowMs),
+                    "earlyByMs" to eligibility.earlyByMs
+                )
+            )
+
+            if (!eligibility.allowed) {
+                return AutomaticRotationAttempt.NotDue(
+                    dueAtMs = eligibility.dueAtMs,
+                    remainingMs = eligibility.dueAtMs - eligibility.nowMs,
+                    reason = eligibility.reason
+                )
+            }
+
+            // Only the caller that actually owns the rotation slot gets to interrupt a
+            // preload. Busy/not-due callers leave the cache worker alone.
+            RotationScheduler.requestAutomaticPriority(appContext, source)
+
+            // Safety wake-up while the durable gate remains unchanged. If setBitmap
+            // stalls/crashes, the future alarm sees the same overdue gate and retries.
+            RotationAlarmScheduler.scheduleWatchdog(appContext, settings.intervalMinutes)
+
+            val outcome = try {
+                rotateOnceLocked(
+                    appContext = appContext,
+                    settings = settings,
+                    deepApplyDiagnostics = false
+                )
+            } catch (failure: Throwable) {
+                Diagnostics.log(
+                    appContext,
+                    "rotation.automatic.apply_failed_gate_preserved",
+                    level = "ERROR",
+                    fields = mapOf(
+                        "source" to source,
+                        "dueElapsedMs" to eligibility.dueAtMs
+                    ),
+                    throwable = failure
+                )
+                // Watchdog remains armed; DO NOT consume the due gate.
+                throw failure
+            }
+
+            val completion = AutoRotationGate.completeSuccessfulRun(
+                context = appContext,
+                intervalMinutes = settings.intervalMinutes,
+                expectedDueAtMs = eligibility.dueAtMs,
+                source = source
+            )
+
+            if (completion.nextDueAtMs > 0L) {
+                RotationAlarmScheduler.schedule(appContext, completion.nextDueAtMs)
+            }
+
+            Diagnostics.log(
+                appContext,
+                "rotation.automatic.cadence_complete",
+                fields = mapOf(
+                    "source" to source,
+                    "committed" to completion.committed,
+                    "reason" to completion.reason,
+                    "previousDueElapsedMs" to completion.previousDueAtMs,
+                    "nextDueElapsedMs" to completion.nextDueAtMs,
+                    "earlyByMs" to eligibility.earlyByMs
+                )
+            )
+
+            return AutomaticRotationAttempt.Success(
+                outcome = outcome,
+                previousDueAtMs = eligibility.dueAtMs,
+                nextDueAtMs = completion.nextDueAtMs,
+                earlyByMs = eligibility.earlyByMs,
+                cadenceCommitted = completion.committed
+            )
+        } finally {
+            rotationLock.unlock()
+        }
+    }
+
+    private fun rotateOnceLocked(
+        appContext: Context,
+        settings: AppSettings,
+        deepApplyDiagnostics: Boolean
+    ): RotationOutcome {
         val cache = WallpaperCache(appContext)
         val orientation = DeviceProfile.resolveOrientation(appContext, settings.orientationMode)
 
@@ -56,7 +203,9 @@ object RotationEngine {
             fields = mapOf(
                 "target" to settings.targetMode.name,
                 "orientation" to orientation.name,
-                "cacheFiles" to cache.countAll()
+                "cacheFiles" to cache.countAll(),
+                "deepApplyDiagnostics" to deepApplyDiagnostics,
+                "interactive" to BackgroundExecutionState.isInteractive(appContext)
             )
         )
 
@@ -71,7 +220,13 @@ object RotationEngine {
                         orientation,
                         cache
                     )
-                    val applied = applyPrepared(appContext, prepared, orientation, cache)
+                    val applied = applyPrepared(
+                        appContext,
+                        prepared,
+                        orientation,
+                        cache,
+                        deepApplyDiagnostics
+                    )
                     RotationOutcome(listOf(applied.destination), listOf(applied.wallhavenId))
                 }
 
@@ -83,22 +238,26 @@ object RotationEngine {
                         orientation,
                         cache
                     )
-                    val applied = applyPrepared(appContext, prepared, orientation, cache)
+                    val applied = applyPrepared(
+                        appContext,
+                        prepared,
+                        orientation,
+                        cache,
+                        deepApplyDiagnostics
+                    )
                     RotationOutcome(listOf(applied.destination), listOf(applied.wallhavenId))
                 }
 
                 TargetMode.BOTH_SAME -> rotateSameOnBoth(
-                    appContext,
-                    PoolKeys.shared(settings.homeProfile, orientation),
-                    settings.homeProfile,
-                    orientation,
-                    cache
+                    context = appContext,
+                    poolKey = PoolKeys.shared(settings.homeProfile, orientation),
+                    profile = settings.homeProfile,
+                    orientation = orientation,
+                    cache = cache,
+                    deepApplyDiagnostics = deepApplyDiagnostics
                 )
 
                 TargetMode.BOTH_INDEPENDENT -> {
-                    // Prepare BOTH destinations before applying either one. On an empty
-                    // cache each miss fetches just one image, so Home can no longer spend
-                    // a minute filling its pool before Lock even gets attempted.
                     val homePrepared = prepareOne(
                         PoolKeys.home(settings.homeProfile, orientation),
                         settings.homeProfile,
@@ -124,11 +283,24 @@ object RotationEngine {
                             homePrepared = homePrepared,
                             lockPrepared = lockPrepared,
                             orientation = orientation,
-                            cache = cache
+                            cache = cache,
+                            deepApplyDiagnostics = deepApplyDiagnostics
                         )
                     } else {
-                        val home = applyPrepared(appContext, homePrepared, orientation, cache)
-                        val lock = applyPrepared(appContext, lockPrepared, orientation, cache)
+                        val home = applyPrepared(
+                            appContext,
+                            homePrepared,
+                            orientation,
+                            cache,
+                            deepApplyDiagnostics
+                        )
+                        val lock = applyPrepared(
+                            appContext,
+                            lockPrepared,
+                            orientation,
+                            cache,
+                            deepApplyDiagnostics
+                        )
                         RotationOutcome(
                             destinations = listOf(home.destination, lock.destination),
                             wallhavenIds = listOf(home.wallhavenId, lock.wallhavenId)
@@ -137,8 +309,6 @@ object RotationEngine {
                 }
             }
 
-            // Never refill inline between Home and Lock. Replenishment is a unique,
-            // asynchronous WorkManager job and cannot block the visible rotation.
             RotationScheduler.preloadIfNeeded(appContext)
 
             Diagnostics.log(
@@ -201,20 +371,27 @@ object RotationEngine {
         context: Context,
         prepared: Prepared,
         orientation: ResolvedOrientation,
-        cache: WallpaperCache
+        cache: WallpaperCache,
+        deepApplyDiagnostics: Boolean
     ): Applied {
-        val applyResult = WallpaperApplier.apply(context, prepared.file, prepared.flag, orientation)
+        val applyResult = WallpaperApplier.apply(
+            context = context,
+            file = prepared.file,
+            which = prepared.flag,
+            orientation = orientation,
+            deepDiagnostics = deepApplyDiagnostics
+        )
         cache.consume(prepared.poolKey, prepared.wallpaper)
         return Applied(applyResult.destination, prepared.wallpaper.id)
     }
-
 
     private fun rotateIndependentHonorCompatibility(
         appContext: Context,
         homePrepared: Prepared,
         lockPrepared: Prepared,
         orientation: ResolvedOrientation,
-        cache: WallpaperCache
+        cache: WallpaperCache,
+        deepApplyDiagnostics: Boolean
     ): RotationOutcome {
         Diagnostics.log(
             appContext,
@@ -224,20 +401,17 @@ object RotationEngine {
                 "manufacturer" to Build.MANUFACTURER,
                 "brand" to Build.BRAND,
                 "homeWallpaperId" to homePrepared.wallpaper.id,
-                "lockWallpaperId" to lockPrepared.wallpaper.id
+                "lockWallpaperId" to lockPrepared.wallpaper.id,
+                "deepApplyDiagnostics" to deepApplyDiagnostics
             )
         )
 
-        // Alpha.6 proved that HONOR visibly refreshes the lock screen when the Lock
-        // candidate is submitted with SYSTEM|LOCK. The old diagnostic implementation
-        // intentionally waited for several seconds before restoring Home, making both
-        // screens visibly identical for a while. Alpha.7 prepares both bitmaps first,
-        // performs the combined Lock write, and restores Home immediately.
         val pair = WallpaperApplier.applyHonorIndependentPair(
             context = appContext,
             homeFile = homePrepared.file,
             lockFile = lockPrepared.file,
-            orientation = orientation
+            orientation = orientation,
+            deepDiagnostics = deepApplyDiagnostics
         )
 
         Diagnostics.log(
@@ -270,17 +444,27 @@ object RotationEngine {
         poolKey: String,
         profile: ProfileSettings,
         orientation: ResolvedOrientation,
-        cache: WallpaperCache
+        cache: WallpaperCache,
+        deepApplyDiagnostics: Boolean
     ): RotationOutcome {
         val wallpaper = cache.peek(poolKey, profile, orientation)
             ?: error("Cache vide et aucun wallpaper récupérable")
         val file = cache.fileFor(poolKey, wallpaper.fileName)
 
-        // Apply the exact same bitmap to each destination separately. Android's API
-        // accepts combined flags, but separate calls let us verify/log home and lock
-        // independently and are more robust across OEM wallpaper implementations.
-        val home = WallpaperApplier.apply(context, file, WallpaperManager.FLAG_SYSTEM, orientation)
-        val lock = WallpaperApplier.apply(context, file, WallpaperManager.FLAG_LOCK, orientation)
+        val home = WallpaperApplier.apply(
+            context,
+            file,
+            WallpaperManager.FLAG_SYSTEM,
+            orientation,
+            deepApplyDiagnostics
+        )
+        val lock = WallpaperApplier.apply(
+            context,
+            file,
+            WallpaperManager.FLAG_LOCK,
+            orientation,
+            deepApplyDiagnostics
+        )
 
         cache.consume(poolKey, wallpaper)
 

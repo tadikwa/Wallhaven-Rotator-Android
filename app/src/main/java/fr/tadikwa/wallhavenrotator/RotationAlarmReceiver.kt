@@ -3,13 +3,17 @@ package fr.tadikwa.wallhavenrotator
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.SystemClock
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 
 /**
- * Explicit AlarmManager entry point. The system can instantiate this receiver even
- * after HONOR/MagicOS has killed the app process.
+ * Exact-alarm entry point.
+ *
+ * The receiver never calls WallpaperManager while the display is non-interactive. A
+ * due wake-up in deep sleep is converted into a non-wakeup elapsed alarm so Android
+ * delivers it after a natural wake. The durable gate stays due the whole time.
  */
 class RotationAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
@@ -17,24 +21,28 @@ class RotationAlarmReceiver : BroadcastReceiver() {
 
         val appContext = context.applicationContext
         val settings = SettingsRepository(appContext).load()
-        val now = System.currentTimeMillis()
+        val nowElapsed = SystemClock.elapsedRealtime()
         val gateDueAt = AutoRotationGate.nextDueAt(appContext)
         val invocation = RotationAlarmScheduler.invocation(intent)
         val currentAlarm = RotationAlarmScheduler.currentSnapshot(appContext)
         val invocationIsCurrent = RotationAlarmScheduler.isCurrent(appContext, invocation)
-        val decision = AlarmDispatchPolicy.decide(now, gateDueAt, invocationIsCurrent)
+        val interactive = BackgroundExecutionState.isInteractive(appContext)
+        val decision = AlarmDispatchPolicy.decide(nowElapsed, gateDueAt, invocationIsCurrent)
 
         Diagnostics.log(
             appContext,
             "alarm.rotation.received",
             fields = mapOf(
+                "clock" to "elapsedRealtime",
                 "enabled" to settings.enabled,
-                "nowMs" to now,
-                "gateDueAtMs" to gateDueAt,
+                "interactive" to interactive,
+                "nowElapsedMs" to nowElapsed,
+                "gateDueElapsedMs" to gateDueAt,
                 "invocationScheduleId" to invocation.scheduleId,
-                "invocationDueAtMs" to invocation.scheduledDueAtMs,
+                "invocationTriggerElapsedMs" to invocation.triggerAtMs,
                 "currentScheduleId" to currentAlarm.scheduleId,
-                "currentAlarmDueAtMs" to currentAlarm.dueAtMs,
+                "currentTriggerElapsedMs" to currentAlarm.triggerAtMs,
+                "currentPurpose" to currentAlarm.purpose,
                 "invocationIsCurrent" to invocationIsCurrent,
                 "dispatchAction" to decision.action.name,
                 "dispatchReason" to decision.reason,
@@ -48,20 +56,40 @@ class RotationAlarmReceiver : BroadcastReceiver() {
             return
         }
 
-        when (decision.action) {
-            AlarmDispatchAction.IGNORE_STALE -> {
-                Diagnostics.log(
-                    appContext,
-                    "alarm.rotation.stale_ignored",
-                    fields = mapOf(
-                        "scheduleId" to invocation.scheduleId,
-                        "currentScheduleId" to currentAlarm.scheduleId,
-                        "remainingMs" to decision.remainingMs,
-                        "reason" to decision.reason
-                    )
+        if (!invocationIsCurrent) {
+            Diagnostics.log(
+                appContext,
+                "alarm.rotation.stale_ignored",
+                fields = mapOf(
+                    "scheduleId" to invocation.scheduleId,
+                    "currentScheduleId" to currentAlarm.scheduleId,
+                    "reason" to "stale_identity"
                 )
-                return
-            }
+            )
+            return
+        }
+
+        // Critical HONOR/MagicOS rule learned from the overnight trace: setBitmap can
+        // block for minutes while the screen is off. Do not enter WallpaperManager at
+        // all in that state, and do not consume the cadence gate.
+        if (!interactive) {
+            val deferred = RotationAlarmScheduler.scheduleDeferredUntilAwake(appContext)
+            Diagnostics.log(
+                appContext,
+                "alarm.rotation.deferred_sleeping",
+                fields = mapOf(
+                    "gateDueElapsedMs" to gateDueAt,
+                    "gateOverdueMs" to (nowElapsed - gateDueAt).coerceAtLeast(0L),
+                    "deferredScheduleId" to deferred.scheduleId,
+                    "deferredTriggerElapsedMs" to deferred.triggerAtMs,
+                    "mode" to deferred.mode
+                )
+            )
+            return
+        }
+
+        when (decision.action) {
+            AlarmDispatchAction.IGNORE_STALE -> Unit
 
             AlarmDispatchAction.RESCHEDULE_CURRENT -> {
                 val alarm = RotationAlarmScheduler.schedule(appContext, gateDueAt)
@@ -71,20 +99,33 @@ class RotationAlarmReceiver : BroadcastReceiver() {
                     fields = mapOf(
                         "remainingMs" to decision.remainingMs,
                         "scheduleId" to alarm.scheduleId,
-                        "dueAtMs" to alarm.dueAtMs,
+                        "triggerElapsedMs" to alarm.triggerAtMs,
                         "mode" to alarm.mode
                     )
                 )
-                return
             }
 
-            AlarmDispatchAction.RUN_NOW,
-            AlarmDispatchAction.WAIT_THEN_RUN -> {
+            AlarmDispatchAction.RUN_NOW -> {
+                // Install a watchdog BEFORE any app-owned work. If WallpaperManager or
+                // the process dies, the gate remains due and this future alarm retries.
+                val watchdog = RotationAlarmScheduler.scheduleWatchdog(
+                    appContext,
+                    settings.intervalMinutes
+                )
+                Diagnostics.log(
+                    appContext,
+                    "alarm.rotation.watchdog_armed",
+                    fields = mapOf(
+                        "scheduleId" to watchdog.scheduleId,
+                        "triggerElapsedMs" to watchdog.triggerAtMs,
+                        "mode" to watchdog.mode
+                    )
+                )
+
                 runCatching {
                     RotationForegroundService.startForAlarm(
                         context = appContext,
-                        targetDueAtMs = gateDueAt,
-                        wakeScheduleId = currentAlarm.scheduleId,
+                        wakeScheduleId = invocation.scheduleId,
                         wakeReason = decision.reason
                     )
                 }.onFailure { failure ->
@@ -92,10 +133,7 @@ class RotationAlarmReceiver : BroadcastReceiver() {
                         appContext,
                         "alarm.rotation.service_start_failure",
                         level = "ERROR",
-                        fields = mapOf(
-                            "targetDueAtMs" to gateDueAt,
-                            "wakeReason" to decision.reason
-                        ),
+                        fields = mapOf("wakeReason" to decision.reason),
                         throwable = failure
                     )
                     WorkManager.getInstance(appContext).enqueueUniqueWork(

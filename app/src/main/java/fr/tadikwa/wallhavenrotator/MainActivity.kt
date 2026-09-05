@@ -108,8 +108,8 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(Unit) {
-                    // Alpha.11 keeps the next deadline in AlarmManager, outside our
-                    // process, so MagicOS can kill the app without deleting the wake-up.
+                    // Alpha.15 keeps cadence in monotonic AlarmManager deadlines. Sleeping-device
+                    // wake-ups are deferred without entering WallpaperManager.
                     val schedulerMigration =
                         AutoRotationGate.configVersion(context.applicationContext) !=
                             AutoRotationGate.CONFIG_VERSION
@@ -387,7 +387,7 @@ private fun MainScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(if (settings.enabled) "Activée" else "En pause", fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Alarme système Android + WorkManager de secours ; intervalle minimal : 15 min",
+                                "Alarme système Android ; changement différé écran éteint ; WorkManager de secours",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
