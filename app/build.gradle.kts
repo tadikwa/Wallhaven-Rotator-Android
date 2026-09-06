@@ -18,8 +18,8 @@ android {
         applicationId = "fr.tadikwa.wallhavenrotator"
         minSdk = 24
         targetSdk = 36
-        versionCode = 18
-        versionName = "0.1.0-alpha.18"
+        versionCode = 19
+        versionName = "0.1.0-alpha.19"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

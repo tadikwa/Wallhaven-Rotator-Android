@@ -134,6 +134,8 @@ object Diagnostics {
             appendLine("gate=${AutoRotationGate.statusSummary(appContext)}")
             appendLine("alarm=${RotationAlarmScheduler.statusSummary(appContext)}")
             appendLine("foregroundService=${RotationServiceStatus.summary(appContext)}")
+            appendLine("backgroundReliability=${BackgroundReliability.summary(appContext)}")
+            appendLine("honorAppLaunchPolicy=manual_check_required_on_honor")
             appendLine()
             appendLine("[WorkManager]")
             appendLine("periodic=$periodic")

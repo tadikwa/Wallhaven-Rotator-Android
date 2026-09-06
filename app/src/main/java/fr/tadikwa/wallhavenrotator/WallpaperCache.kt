@@ -27,6 +27,47 @@ class WallpaperCache(private val context: Context) {
         return queue.firstOrNull()
     }
 
+    /**
+     * Automatic rotations are never allowed to enter refill(): refill intentionally
+     * owns CACHE_LOCK while it performs Wallhaven I/O. Waiting on that lock is exactly
+     * what made an alpha.18 alarm stall before WallpaperManager while a preload socket
+     * was suspended by MagicOS.
+     */
+    fun peekCachedOnly(poolKey: String): CachedWallpaper? =
+        loadQueue(poolKey).firstOrNull { rawFileFor(poolKey, it.fileName).isFile }
+
+    /**
+     * Post-apply bookkeeping for the automatic path must not wait behind a preload.
+     * Delete the consumed file and leave queue compaction to the next maintenance or
+     * preload pass. peekCachedOnly() already ignores missing files, so a stale queue
+     * entry can never be selected again.
+     */
+    fun consumeAfterAutomaticApply(poolKey: String, wallpaper: CachedWallpaper) {
+        runCatching { addHistory(wallpaper.id) }
+            .onFailure { failure ->
+                Diagnostics.log(
+                    context,
+                    "cache.automatic_history_failure",
+                    level = "WARN",
+                    fields = mapOf("pool" to poolKey, "wallhavenId" to wallpaper.id),
+                    throwable = failure
+                )
+            }
+
+        val deleted = runCatching { rawFileFor(poolKey, wallpaper.fileName).delete() }
+            .getOrDefault(false)
+        Diagnostics.log(
+            context,
+            "cache.automatic_consumed",
+            fields = mapOf(
+                "pool" to poolKey,
+                "wallhavenId" to wallpaper.id,
+                "file" to wallpaper.fileName,
+                "fileDeleted" to deleted
+            )
+        )
+    }
+
     fun consume(poolKey: String, wallpaper: CachedWallpaper) = synchronized(CACHE_LOCK) {
         val queue = loadQueue(poolKey).filterNot { it.id == wallpaper.id && it.fileName == wallpaper.fileName }
         saveQueue(poolKey, queue)
@@ -360,6 +401,26 @@ class WallpaperCache(private val context: Context) {
             .putString(seedKey, seed)
             .apply()
 
+        // Cancellation is the automatic rotation asking preload to get out of its way.
+        // Do not perform cleanup/enforcement while the rotation is about to decode and
+        // apply files from the same cache. A later preload/maintenance pass will compact
+        // stale queue entries and enforce the disk budget.
+        if (stopRequested()) {
+            val finalQueue = loadQueue(poolKey).filter { rawFileFor(poolKey, it.fileName).isFile }
+            Diagnostics.log(
+                context,
+                "cache.refill.interrupted",
+                fields = mapOf(
+                    "pool" to poolKey,
+                    "before" to initialCount,
+                    "after" to finalQueue.size,
+                    "metadataChecks" to metadataChecks,
+                    "phase" to "before_cleanup"
+                )
+            )
+            return
+        }
+
         cleanupOrphans()
         enforceLimit(cacheLimitMb)
         val finalQueue = loadQueue(poolKey).filter { rawFileFor(poolKey, it.fileName).isFile }
@@ -384,20 +445,6 @@ class WallpaperCache(private val context: Context) {
                 "cacheBytes" to stats().bytes
             )
         )
-
-        if (stoppedEarly) {
-            Diagnostics.log(
-                context,
-                "cache.refill.interrupted",
-                fields = mapOf(
-                    "pool" to poolKey,
-                    "before" to initialCount,
-                    "after" to finalQueue.size,
-                    "metadataChecks" to metadataChecks
-                )
-            )
-            return
-        }
 
         if (finalQueue.isEmpty()) {
             val failure = lastFailure

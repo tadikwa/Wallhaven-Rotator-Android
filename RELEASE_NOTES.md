@@ -1,3 +1,14 @@
+# 0.1.0-alpha.19
+
+- Keep the proven HONOR bitmap transport unchanged: Lock candidate to SYSTEM|LOCK, then immediate Home restore to SYSTEM.
+- Make automatic rotation cache-only: it never waits for preload network I/O and never refills Wallhaven inside the wallpaper transaction.
+- Remove the alpha.18 cache-lock inversion that could stall an automatic rotation after `rotation.start` before entering `WallpaperManager`.
+- Preserve an overdue cadence gate on an automatic cache miss, request a preload outside the wallpaper transaction, and let the system-owned watchdog retry later.
+- Make preload cancellation exit before final cleanup/limit enforcement when automatic rotation has requested priority.
+- Report standard Android background restriction / battery-optimization state and request the standard battery-optimization exemption once per app version on HONOR when needed.
+- Add a one-time HONOR App Launch reminder because MagicOS can suppress background execution independently of Android's exact-alarm permission.
+- Keep AlarmManager monotonic exact wakeups, WorkManager repair-only behavior, unlocked/interactive gating, success-only cadence commit and Strict v5 filtering.
+
 # 0.1.0-alpha.18
 
 - Roll back the automatic `WallpaperManager.setStream()` transport introduced in alpha.17 after HONOR/MagicOS reverted both Home and Lock to the OEM default wallpapers after a background apply.

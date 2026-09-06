@@ -74,9 +74,60 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         val settings = SettingsRepository(applicationContext).load()
         if (settings.enabled) {
-            // Returning from Android's exact-alarm special-access screen must immediately
-            // re-register the deadline as exact without postponing it.
+            // Returning from any reliability settings screen must immediately reconcile
+            // the same durable deadline; never postpone a due rotation.
             RotationScheduler.reconcile(applicationContext, settings)
+
+            val reliability = BackgroundReliability.snapshot(applicationContext)
+            Diagnostics.log(
+                applicationContext,
+                "background.reliability.resume",
+                fields = mapOf(
+                    "exactAlarmAllowed" to reliability.exactAlarmAllowed,
+                    "batteryOptimizationIgnored" to reliability.batteryOptimizationIgnored,
+                    "backgroundRestricted" to reliability.backgroundRestricted,
+                    "honorDevice" to reliability.honorDevice
+                )
+            )
+
+            // Exact-alarm access remains the first requirement. Once it is available,
+            // ask at most once per app version for the standard Doze/App Standby
+            // exemption. Wallhaven Rotator is a task-automation app whose core function
+            // is a scheduled action, so losing background execution breaks that core.
+            if (
+                reliability.exactAlarmAllowed &&
+                BackgroundReliability.shouldRequestBatteryOptimizationExemption(applicationContext)
+            ) {
+                BackgroundReliability.markBatteryOptimizationPrompted(applicationContext)
+                Diagnostics.log(applicationContext, "background.reliability.request_battery_exemption")
+                runCatching {
+                    startActivity(
+                        BackgroundReliability.requestBatteryOptimizationExemptionIntent(
+                            applicationContext
+                        )
+                    )
+                }.recoverCatching {
+                    startActivity(BackgroundReliability.batteryOptimizationSettingsIntent())
+                }.onFailure { failure ->
+                    Diagnostics.log(
+                        applicationContext,
+                        "background.reliability.battery_settings_failure",
+                        level = "WARN",
+                        throwable = failure
+                    )
+                }
+            } else if (
+                reliability.honorDevice &&
+                BackgroundReliability.shouldShowHonorLaunchHint(applicationContext)
+            ) {
+                BackgroundReliability.markHonorLaunchHintShown(applicationContext)
+                Diagnostics.log(applicationContext, "background.reliability.honor_launch_hint")
+                Toast.makeText(
+                    this,
+                    "HONOR : dans Lancement d'application, désactive « Gérée automatiquement » pour Wallhaven Rotator et autorise l'exécution en arrière-plan.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
         }
     }
 

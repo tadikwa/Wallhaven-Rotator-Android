@@ -227,6 +227,25 @@ class RotationForegroundService : Service() {
                     )
                 }
             }
+        } catch (cacheMiss: AutomaticCacheMissException) {
+            // Automatic apply never performs network I/O. Ask WorkManager to refill
+            // outside the wallpaper transaction and preserve the overdue cadence gate.
+            RotationScheduler.preload(appContext)
+            val watchdog = RotationAlarmScheduler.scheduleWatchdog(
+                appContext,
+                settings.intervalMinutes
+            )
+            Diagnostics.log(
+                appContext,
+                "service.rotation.cache_miss_preload_requested",
+                level = "WARN",
+                fields = mapOf(
+                    "source" to "alarm_manager",
+                    "pool" to cacheMiss.poolKey,
+                    "gateDueElapsedMs" to AutoRotationGate.nextDueAt(appContext),
+                    "watchdogTriggerElapsedMs" to watchdog.triggerAtMs
+                )
+            )
         } catch (failure: Throwable) {
             val watchdog = RotationAlarmScheduler.scheduleWatchdog(
                 appContext,

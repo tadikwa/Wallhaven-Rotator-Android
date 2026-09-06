@@ -19,6 +19,9 @@ data class RotationOutcome(
     }
 }
 
+class AutomaticCacheMissException(val poolKey: String) :
+    IllegalStateException("Automatic rotation cache is empty for $poolKey")
+
 sealed interface AutomaticRotationAttempt {
     data class Success(
         val outcome: RotationOutcome,
@@ -55,7 +58,8 @@ object RotationEngine {
             rotateOnceLocked(
                 appContext = context.applicationContext,
                 settings = settings,
-                deepApplyDiagnostics = true
+                deepApplyDiagnostics = true,
+                automatic = false
             )
         }
 
@@ -73,7 +77,8 @@ object RotationEngine {
             rotateOnceLocked(
                 appContext = context.applicationContext,
                 settings = settings,
-                deepApplyDiagnostics = false
+                deepApplyDiagnostics = false,
+                automatic = false
             )
         } finally {
             rotationLock.unlock()
@@ -163,7 +168,8 @@ object RotationEngine {
                 rotateOnceLocked(
                     appContext = appContext,
                     settings = settings,
-                    deepApplyDiagnostics = false
+                    deepApplyDiagnostics = false,
+                    automatic = true
                 )
             } catch (deferred: AutomaticWallpaperApplyDeferredException) {
                 Diagnostics.log(
@@ -238,7 +244,8 @@ object RotationEngine {
     private fun rotateOnceLocked(
         appContext: Context,
         settings: AppSettings,
-        deepApplyDiagnostics: Boolean
+        deepApplyDiagnostics: Boolean,
+        automatic: Boolean
     ): RotationOutcome {
         val cache = WallpaperCache(appContext)
         val orientation = DeviceProfile.resolveOrientation(appContext, settings.orientationMode)
@@ -252,6 +259,7 @@ object RotationEngine {
                 "orientation" to orientation.name,
                 "cacheFiles" to cache.countAll(),
                 "deepApplyDiagnostics" to deepApplyDiagnostics,
+                "automatic" to automatic,
                 "interactive" to executionState.interactive,
                 "deviceLocked" to executionState.deviceLocked,
                 "keyguardLocked" to executionState.keyguardLocked,
@@ -260,7 +268,8 @@ object RotationEngine {
         )
 
         try {
-            cache.pruneToSettings(settings)
+            // Never wait behind preload network I/O on an automatic alarm path.
+            if (!automatic) cache.pruneToSettings(settings)
             val outcome = when (settings.targetMode) {
                 TargetMode.HOME -> {
                     val prepared = prepareOne(
@@ -268,14 +277,16 @@ object RotationEngine {
                         settings.homeProfile,
                         WallpaperManager.FLAG_SYSTEM,
                         orientation,
-                        cache
+                        cache,
+                        automatic
                     )
                     val applied = applyPrepared(
                         appContext,
                         prepared,
                         orientation,
                         cache,
-                        deepApplyDiagnostics
+                        deepApplyDiagnostics,
+                        automatic
                     )
                     RotationOutcome(listOf(applied.destination), listOf(applied.wallhavenId))
                 }
@@ -286,14 +297,16 @@ object RotationEngine {
                         settings.lockProfile,
                         WallpaperManager.FLAG_LOCK,
                         orientation,
-                        cache
+                        cache,
+                        automatic
                     )
                     val applied = applyPrepared(
                         appContext,
                         prepared,
                         orientation,
                         cache,
-                        deepApplyDiagnostics
+                        deepApplyDiagnostics,
+                        automatic
                     )
                     RotationOutcome(listOf(applied.destination), listOf(applied.wallhavenId))
                 }
@@ -304,7 +317,8 @@ object RotationEngine {
                     profile = settings.homeProfile,
                     orientation = orientation,
                     cache = cache,
-                    deepApplyDiagnostics = deepApplyDiagnostics
+                    deepApplyDiagnostics = deepApplyDiagnostics,
+                    automatic = automatic
                 )
 
                 TargetMode.BOTH_INDEPENDENT -> {
@@ -313,14 +327,16 @@ object RotationEngine {
                         settings.homeProfile,
                         WallpaperManager.FLAG_SYSTEM,
                         orientation,
-                        cache
+                        cache,
+                        automatic
                     )
                     val lockPrepared = prepareOne(
                         PoolKeys.lock(settings.lockProfile, orientation),
                         settings.lockProfile,
                         WallpaperManager.FLAG_LOCK,
                         orientation,
-                        cache
+                        cache,
+                        automatic
                     )
 
                     check(homePrepared.wallpaper.id != lockPrepared.wallpaper.id) {
@@ -334,7 +350,8 @@ object RotationEngine {
                             lockPrepared = lockPrepared,
                             orientation = orientation,
                             cache = cache,
-                            deepApplyDiagnostics = deepApplyDiagnostics
+                            deepApplyDiagnostics = deepApplyDiagnostics,
+                            automatic = automatic
                         )
                     } else {
                         val home = applyPrepared(
@@ -342,14 +359,16 @@ object RotationEngine {
                             homePrepared,
                             orientation,
                             cache,
-                            deepApplyDiagnostics
+                            deepApplyDiagnostics,
+                            automatic
                         )
                         val lock = applyPrepared(
                             appContext,
                             lockPrepared,
                             orientation,
                             cache,
-                            deepApplyDiagnostics
+                            deepApplyDiagnostics,
+                            automatic
                         )
                         RotationOutcome(
                             destinations = listOf(home.destination, lock.destination),
@@ -359,7 +378,18 @@ object RotationEngine {
                 }
             }
 
-            RotationScheduler.preloadIfNeeded(appContext)
+            // Cache replenishment is maintenance, not part of a successful wallpaper
+            // transaction. It must never turn two successful setBitmap() calls into a
+            // failed cadence commit.
+            runCatching { RotationScheduler.preloadIfNeeded(appContext) }
+                .onFailure { failure ->
+                    Diagnostics.log(
+                        appContext,
+                        "rotation.preload_schedule_failure_ignored",
+                        level = "WARN",
+                        throwable = failure
+                    )
+                }
 
             Diagnostics.log(
                 appContext,
@@ -405,10 +435,16 @@ object RotationEngine {
         profile: ProfileSettings,
         flag: Int,
         orientation: ResolvedOrientation,
-        cache: WallpaperCache
+        cache: WallpaperCache,
+        automatic: Boolean
     ): Prepared {
-        val wallpaper = cache.peek(poolKey, profile, orientation)
-            ?: error("Cache vide et aucun wallpaper récupérable")
+        val wallpaper = if (automatic) {
+            cache.peekCachedOnly(poolKey)
+                ?: throw AutomaticCacheMissException(poolKey)
+        } else {
+            cache.peek(poolKey, profile, orientation)
+                ?: error("Cache vide et aucun wallpaper récupérable")
+        }
         return Prepared(
             poolKey = poolKey,
             flag = flag,
@@ -422,7 +458,8 @@ object RotationEngine {
         prepared: Prepared,
         orientation: ResolvedOrientation,
         cache: WallpaperCache,
-        deepApplyDiagnostics: Boolean
+        deepApplyDiagnostics: Boolean,
+        automatic: Boolean
     ): Applied {
         val applyResult = WallpaperApplier.apply(
             context = context,
@@ -431,7 +468,11 @@ object RotationEngine {
             orientation = orientation,
             deepDiagnostics = deepApplyDiagnostics
         )
-        cache.consume(prepared.poolKey, prepared.wallpaper)
+        if (automatic) {
+            cache.consumeAfterAutomaticApply(prepared.poolKey, prepared.wallpaper)
+        } else {
+            cache.consume(prepared.poolKey, prepared.wallpaper)
+        }
         return Applied(applyResult.destination, prepared.wallpaper.id)
     }
 
@@ -441,7 +482,8 @@ object RotationEngine {
         lockPrepared: Prepared,
         orientation: ResolvedOrientation,
         cache: WallpaperCache,
-        deepApplyDiagnostics: Boolean
+        deepApplyDiagnostics: Boolean,
+        automatic: Boolean
     ): RotationOutcome {
         Diagnostics.log(
             appContext,
@@ -476,8 +518,13 @@ object RotationEngine {
             )
         )
 
-        cache.consume(lockPrepared.poolKey, lockPrepared.wallpaper)
-        cache.consume(homePrepared.poolKey, homePrepared.wallpaper)
+        if (automatic) {
+            cache.consumeAfterAutomaticApply(lockPrepared.poolKey, lockPrepared.wallpaper)
+            cache.consumeAfterAutomaticApply(homePrepared.poolKey, homePrepared.wallpaper)
+        } else {
+            cache.consume(lockPrepared.poolKey, lockPrepared.wallpaper)
+            cache.consume(homePrepared.poolKey, homePrepared.wallpaper)
+        }
 
         return RotationOutcome(
             destinations = listOf("home", "lock"),
@@ -495,10 +542,16 @@ object RotationEngine {
         profile: ProfileSettings,
         orientation: ResolvedOrientation,
         cache: WallpaperCache,
-        deepApplyDiagnostics: Boolean
+        deepApplyDiagnostics: Boolean,
+        automatic: Boolean
     ): RotationOutcome {
-        val wallpaper = cache.peek(poolKey, profile, orientation)
-            ?: error("Cache vide et aucun wallpaper récupérable")
+        val wallpaper = if (automatic) {
+            cache.peekCachedOnly(poolKey)
+                ?: throw AutomaticCacheMissException(poolKey)
+        } else {
+            cache.peek(poolKey, profile, orientation)
+                ?: error("Cache vide et aucun wallpaper récupérable")
+        }
         val file = cache.fileFor(poolKey, wallpaper.fileName)
 
         val home = WallpaperApplier.apply(
@@ -516,7 +569,11 @@ object RotationEngine {
             deepApplyDiagnostics
         )
 
-        cache.consume(poolKey, wallpaper)
+        if (automatic) {
+            cache.consumeAfterAutomaticApply(poolKey, wallpaper)
+        } else {
+            cache.consume(poolKey, wallpaper)
+        }
 
         return RotationOutcome(
             destinations = listOf(home.destination, lock.destination),
