@@ -10,6 +10,12 @@ On HONOR, open the phone's **Settings**, search for **App launch** (French: **La
 
 The application cannot read the protected HONOR launch-policy state. Its settings therefore keep the instructions visible instead of declaring this OEM setting verified. See [HONOR's background-app guidance](https://www.honor.com/uk/support/content/en-us00406916/).
 
+## Compatibility status
+
+The first stable release has been physically validated on **HONOR MTN-NX1M / HNMTN-Q1, Android 16 (SDK 36), MagicOS**. The validated alpha.20 rotation engine completed a 52 min 46 s burn-in with the Activity out of focus, three automatic independent Home/Lock rotations, two rotations on battery, and correct defer/resume behavior across a locked-screen deadline.
+
+That is currently the **only formally validated phone/model**. Android 7.0+ is the supported API range, but reliable background execution on other manufacturers is not guaranteed because OEM power and app-launch policies vary. See [COMPATIBILITY.md](COMPATIBILITY.md) for the tested-device matrix and background-reliability checklist.
+
 Installable APKs use a permanent signing key stored only on the owner's PC. Public CI runs tests and compilation without distributing disposable-debug-key APKs. See [SIGNING.md](SIGNING.md) and [RELEASING.md](RELEASING.md).
 
 ## Screenshots
@@ -134,4 +140,4 @@ See [SECURITY.md](SECURITY.md) for OTA verification details.
 
 MIT. See [LICENSE](LICENSE).
 
-> Alpha 16: automatic writes are deferred until the phone is interactive and fully unlocked; the cadence is committed only after a successful wallpaper change.
+> Stable 0.1.0 is a version/documentation-only promotion of the physically validated alpha.20 rotation engine.

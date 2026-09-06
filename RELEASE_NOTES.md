@@ -1,3 +1,15 @@
+# 0.1.0
+
+First stable release of Wallhaven Rotator Android.
+
+- Promote the physically validated alpha.20 rotation engine to stable without changing the scheduler, cache transaction, Strict v5 filtering, foreground-service path or HONOR `setBitmap` pair.
+- Physical validation on HONOR MTN-NX1M / HNMTN-Q1, Android 16 / SDK 36 / MagicOS: 52 min 46 s with the Activity out of focus, three automatic independent Home/Lock rotations, including two on battery.
+- Validate locked-screen behavior: a due deadline remains pending while the device is locked and resumes automatically after unlock without consuming missed cadence.
+- Document the HONOR/MagicOS requirement demonstrated during system-level diagnosis: disable automatic App Launch management and allow auto-launch, secondary launch and background execution. Standard Android battery exemption alone does not verify this OEM policy.
+- Add an explicit compatibility statement: the HONOR device above is currently the only formally validated hardware. Other Android 7.0+ devices remain unverified for background reliability.
+- Keep the permanent local signing identity. Stable `versionCode` 21 is intentionally greater than alpha.20 code 20 so existing permanent-key alpha.20 installations can update normally.
+- Build, test, sign and publish the installable release locally; public GitHub Actions remains validation-only and is not required to produce the release APK.
+
 # 0.1.0-alpha.20
 
 - Replace the transient HONOR reminder with persistent, actionable App Launch instructions: disable automatic management and enable auto-launch, secondary launch and background execution. Android battery exemption alone does not verify this protected OEM setting.
