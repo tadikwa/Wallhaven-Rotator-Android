@@ -6,6 +6,13 @@ local.properties
 app/build/
 *.jks
 *.keystore
+*.p12
+*.pfx
+signing-secrets.json
+.private/
+*.apk
+bugreport*.zip
+bugreport*.txt
 captures/
 .externalNativeBuild/
 .cxx/

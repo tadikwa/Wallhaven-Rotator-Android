@@ -116,17 +116,6 @@ class MainActivity : ComponentActivity() {
                         throwable = failure
                     )
                 }
-            } else if (
-                reliability.honorDevice &&
-                BackgroundReliability.shouldShowHonorLaunchHint(applicationContext)
-            ) {
-                BackgroundReliability.markHonorLaunchHintShown(applicationContext)
-                Diagnostics.log(applicationContext, "background.reliability.honor_launch_hint")
-                Toast.makeText(
-                    this,
-                    "HONOR : dans Lancement d'application, désactive « Gérée automatiquement » pour Wallhaven Rotator et autorise l'exécution en arrière-plan.",
-                    Toast.LENGTH_LONG
-                ).show()
             }
         }
     }
@@ -427,6 +416,35 @@ private fun MainScreen(
                     device = DeviceProfile.displayLabel(context, settings.orientationMode),
                     cacheStats = cacheStats
                 )
+            }
+            if (BackgroundReliability.isHonorDevice()) {
+                item {
+                    SettingCard("Arrière-plan sur HONOR") {
+                        Text(
+                            "Dans Paramètres, recherchez « Lancement des applications », puis Wallhaven Rotator.",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Désactivez « Gérée automatiquement ». Activez les trois options : lancement automatique, lancement secondaire et exécution en arrière-plan, puis validez.",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "À vérifier manuellement, même si l'exemption batterie Android est accordée : l'application ne peut pas lire ce réglage HONOR.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        OutlinedButton(onClick = {
+                            runCatching {
+                                context.startActivity(BackgroundReliability.deviceSettingsIntent())
+                            }.onFailure {
+                                Toast.makeText(context, "Ouvrez les paramètres du téléphone depuis l'écran d'accueil.", Toast.LENGTH_LONG).show()
+                            }
+                        }) {
+                            Text("Paramètres du téléphone")
+                        }
+                    }
+                }
             }
             item {
                 SettingCard("Rotation automatique") {

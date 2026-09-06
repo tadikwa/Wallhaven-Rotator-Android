@@ -1,47 +1,23 @@
-# Android release signing
+# Persistent local Android signing
 
-Wallhaven Rotator Android must use one persistent signing key for every real release.
-Android only accepts an in-place APK update when the new APK is signed by a certificate trusted for the installed package.
+All installable APKs are signed on the owner's PC with one persistent key. No private key, password, signing configuration or device diagnostic is uploaded to GitHub, including Actions secrets.
 
-## Important for the first signed release
+The public certificate fingerprint is pinned in `SIGNING_CERTIFICATE_SHA256`. An APK's signing certificate is public information; it is not the private key.
 
-`0.1.0-alpha.1` was built by GitHub Actions with a runner-local debug key. It is suitable for functional testing only.
-Before installing the first persistently signed build, uninstall that debug alpha once. After that transition, future OTA updates can install over the existing app as long as the same release key is kept.
+## Private storage
 
-## Create the key once
+Keep the keystore and `signing-secrets.json` in an access-restricted directory outside this Git checkout. The local build script reads these fields from that JSON file: `keystore` (filename), `alias`, `storePassword`, `keyPassword`. Do not put their values in command-line arguments, logs, Git files or GitHub settings.
 
-Run locally with a JDK installed:
+Back up that entire private directory to secure offline storage. Reuse it for every update; never generate a replacement key for a new version. Losing it prevents normal updates of existing installations.
 
-```powershell
-keytool -genkeypair -v `
-  -keystore wallhaven-rotator-android-release.jks `
-  -alias wallhaven-rotator `
-  -keyalg RSA `
-  -keysize 4096 `
-  -validity 10000
-```
+## Build locally
 
-Back up the `.jks` file and its passwords offline. Never commit the keystore to Git.
+Use JDK 17, Gradle 8.13 and Android SDK platform 36.1 with build-tools 36.1.0. Run `scripts/Build-SignedLocal.ps1` with the local paths supplied through `-GradlePath`, `-JavaHome`, `-AndroidSdk`, `-SigningDirectory` and `-OutputDirectory`. The output directory should be outside the Git checkout. The default variant is Release; `-Variant Debug` is available for physical diagnostics and uses the same persistent certificate.
 
-## GitHub Actions secrets
+The script runs unit tests and builds the APK, verifies its signature against the pinned public fingerprint, then writes the APK, its SHA-256 and local build provenance. For Release builds it also writes the public update manifest consumed by the app. Check `dirty=false` before distributing a release. Temporary Gradle environment variables remain process-local; on Windows a short writable TEMP/TMP path can be needed for Gradle's loopback connection. Run the script with PowerShell 7.
 
-Convert the keystore to Base64 in PowerShell:
+GitHub Actions only validates tests/compilation and uploads unit test results. It does not distribute the runner's temporary-debug-key APK. The release workflow provides local-signing instructions and has no signing secrets or write permission.
 
-```powershell
-[Convert]::ToBase64String(
-  [IO.File]::ReadAllBytes(".\wallhaven-rotator-android-release.jks")
-) | Set-Clipboard
-```
+## One-time migration from old debug builds
 
-Create these repository Actions secrets:
-
-- `ANDROID_KEYSTORE_BASE64` — Base64 content of the `.jks` file
-- `ANDROID_KEYSTORE_PASSWORD` — keystore password
-- `ANDROID_KEY_ALIAS` — normally `wallhaven-rotator`
-- `ANDROID_KEY_PASSWORD` — key password
-
-The signed-release workflow restores the key only into the ephemeral GitHub Actions runner, builds the release APK, verifies it with `apksigner`, generates OTA metadata and publishes the release assets.
-
-## Key continuity
-
-Losing or changing the signing key prevents normal in-place updates for existing installations. Keep at least two secure offline backups.
+Old CI APKs were signed with ephemeral runner debug keys. They cannot be updated in place by the new permanent identity. A one-time reinstall requires the user's explicit agreement and a backup of recoverable data. After migration, verify an `adb install -r` update with the same certificate and preserved configuration. Future debug and release APKs built with the local script share that identity.

@@ -1,133 +1,16 @@
-name: Android signed release
+name: Android release instructions
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  local-signing-required:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Validate signing secrets
-        shell: bash
-        env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      - name: Signing remains on the owner's PC
         run: |
-          test -n "$KEYSTORE_BASE64" || { echo "ANDROID_KEYSTORE_BASE64 is missing"; exit 1; }
-          test -n "$STORE_PASSWORD" || { echo "ANDROID_KEYSTORE_PASSWORD is missing"; exit 1; }
-          test -n "$KEY_ALIAS" || { echo "ANDROID_KEY_ALIAS is missing"; exit 1; }
-          test -n "$KEY_PASSWORD" || { echo "ANDROID_KEY_PASSWORD is missing"; exit 1; }
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
-
-      - name: Install Android SDK packages
-        shell: bash
-        run: sdkmanager "platform-tools" "platforms;android-36.1" "build-tools;36.1.0"
-
-      - name: Set up Gradle 8.13
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: '8.13'
-
-      - name: Restore release signing key
-        shell: bash
-        env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/wallhaven-signing"
-          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/wallhaven-signing/release.jks"
-          chmod 600 "$RUNNER_TEMP/wallhaven-signing/release.jks"
-
-      - name: Unit tests and signed release APK
-        shell: bash
-        env:
-          ANDROID_RELEASE_STORE_FILE: ${{ runner.temp }}/wallhaven-signing/release.jks
-          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: gradle --no-daemon :app:testReleaseUnitTest :app:assembleRelease
-
-      - name: Verify signature and prepare OTA assets
-        id: package
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION_NAME="$(tr -d '\r\n' < VERSION)"
-          TAG="v${VERSION_NAME}"
-          APK_NAME="Wallhaven-Rotator-Android-${TAG}.apk"
-          MANIFEST_NAME="Wallhaven-Rotator-Android-update.json"
-          mkdir -p release
-          cp app/build/outputs/apk/release/app-release.apk "release/${APK_NAME}"
-
-          APKSIGNER="$ANDROID_HOME/build-tools/36.1.0/apksigner"
-          AAPT="$ANDROID_HOME/build-tools/36.1.0/aapt"
-          "$APKSIGNER" verify --verbose --print-certs "release/${APK_NAME}"
-
-          BADGING="$($AAPT dump badging "release/${APK_NAME}" | head -n 1)"
-          VERSION_CODE="$(printf '%s\n' "$BADGING" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")"
-          APK_VERSION_NAME="$(printf '%s\n' "$BADGING" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")"
-          test "$APK_VERSION_NAME" = "$VERSION_NAME" || { echo "VERSION and APK versionName differ"; exit 1; }
-
-          SHA256="$(sha256sum "release/${APK_NAME}" | awk '{print $1}')"
-          printf '%s  %s\n' "$SHA256" "$APK_NAME" > "release/${APK_NAME}.sha256"
-
-          python3 - "$VERSION_NAME" "$VERSION_CODE" "$APK_NAME" "$SHA256" "release/${MANIFEST_NAME}" <<'PY'
-          import json, sys
-          version_name, version_code, apk_name, sha256, output = sys.argv[1:]
-          manifest = {
-              "schema": 1,
-              "applicationId": "fr.tadikwa.wallhavenrotator",
-              "versionName": version_name,
-              "versionCode": int(version_code),
-              "minSdk": 24,
-              "apk": apk_name,
-              "sha256": sha256,
-          }
-          with open(output, "w", encoding="utf-8") as handle:
-              json.dump(manifest, handle, indent=2, ensure_ascii=False)
-              handle.write("\n")
-          PY
-
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          if [[ "$VERSION_NAME" == *-* ]]; then
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create GitHub release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.package.outputs.tag }}
-          PRERELEASE: ${{ steps.package.outputs.prerelease }}
-        run: |
-          set -euo pipefail
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; refusing to overwrite it."
-            exit 1
-          fi
-          args=(release create "$TAG" release/* --target "$GITHUB_SHA" --title "Wallhaven Rotator Android ${TAG#v}" --notes-file RELEASE_NOTES.md)
-          if [[ "$PRERELEASE" == "true" ]]; then
-            args+=(--prerelease)
-          else
-            args+=(--latest)
-          fi
-          gh "${args[@]}"
+          echo "Release signing is local only. No signing key or password is stored in GitHub."
+          echo "Follow SIGNING.md and RELEASING.md to build, verify and upload only the signed APK and public update metadata."

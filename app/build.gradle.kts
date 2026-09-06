@@ -18,8 +18,8 @@ android {
         applicationId = "fr.tadikwa.wallhavenrotator"
         minSdk = 24
         targetSdk = 36
-        versionCode = 19
-        versionName = "0.1.0-alpha.19"
+        versionCode = 20
+        versionName = "0.1.0-alpha.20"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -29,14 +29,19 @@ android {
         if (!storePath.isNullOrBlank()) {
             create("release") {
                 storeFile = file(storePath)
-                storePassword = System.getenv("ANDROID_RELEASE_STORE_PASSWORD")
-                keyAlias = System.getenv("ANDROID_RELEASE_KEY_ALIAS")
-                keyPassword = System.getenv("ANDROID_RELEASE_KEY_PASSWORD")
+                storePassword = requireNotNull(System.getenv("ANDROID_RELEASE_STORE_PASSWORD"))
+                keyAlias = requireNotNull(System.getenv("ANDROID_RELEASE_KEY_ALIAS"))
+                keyPassword = requireNotNull(System.getenv("ANDROID_RELEASE_KEY_PASSWORD"))
             }
         }
     }
 
     buildTypes {
+        debug {
+            // Locally signed test APKs share the permanent release
+            // identity. Local development without signing credentials still works.
+            signingConfigs.findByName("release")?.let { signingConfig = it }
+        }
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.findByName("release")

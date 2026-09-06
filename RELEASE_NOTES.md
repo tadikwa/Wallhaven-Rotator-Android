@@ -1,3 +1,11 @@
+# 0.1.0-alpha.20
+
+- Replace the transient HONOR reminder with persistent, actionable App Launch instructions: disable automatic management and enable auto-launch, secondary launch and background execution. Android battery exemption alone does not verify this protected OEM setting.
+- Preserve the existing bitmap pair, cache-only automatic transaction, Strict v5, monotonic AlarmManager cadence and success-only gate. No receiver/FGS architecture migration.
+- Use one permanent, locally stored signing identity for installable debug and release APKs. Old ephemeral-debug-key installations require one explicitly approved migration; subsequent updates use the same certificate.
+- Public CI validates tests/compilation and uploads test results only. Signing keys, passwords and raw phone diagnostics stay on the owner's PC; no signing secrets are uploaded to GitHub.
+- Physical HONOR validation covered three automatic Home/Lock rotations outside the Activity, including two on battery, a locked-screen deadline deferred without consuming the gate, and recovery through the existing WorkManager-to-alarm handoff.
+
 # 0.1.0-alpha.19
 
 - Keep the proven HONOR bitmap transport unchanged: Lock candidate to SYSTEM|LOCK, then immediate Home restore to SYSTEM.

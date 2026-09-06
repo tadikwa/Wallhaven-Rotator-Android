@@ -20,12 +20,12 @@ data class BackgroundReliabilitySnapshot(
  *
  * HONOR's App launch policy is intentionally not guessed through private OEM APIs. The
  * app can request the standard Doze exemption and report standard restriction state;
- * the HONOR-specific "Manage automatically" switch remains a one-time manual check.
+ * the HONOR-specific "Manage automatically" switch remains a manual check, with
+ * persistent guidance in the UI. The standard exemption does not prove OEM approval.
  */
 object BackgroundReliability {
     private const val PREFS = "wallhaven_background_reliability"
     private const val KEY_BATTERY_PROMPT_VERSION = "battery_prompt_version"
-    private const val KEY_HONOR_HINT_VERSION = "honor_hint_version"
 
     fun snapshot(context: Context): BackgroundReliabilitySnapshot {
         val appContext = context.applicationContext
@@ -76,16 +76,10 @@ object BackgroundReliability {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
 
-    fun shouldShowHonorLaunchHint(context: Context): Boolean {
-        val appContext = context.applicationContext
-        if (!isHonorDevice()) return false
-        return prefs(appContext).getInt(KEY_HONOR_HINT_VERSION, 0) != BuildConfig.VERSION_CODE
-    }
-
-    fun markHonorLaunchHintShown(context: Context) {
-        prefs(context.applicationContext).edit()
-            .putInt(KEY_HONOR_HINT_VERSION, BuildConfig.VERSION_CODE)
-            .apply()
+    // The observed HONOR launch activity requires an OEM permission. Open the
+    // public settings entry point instead of depending on a private component.
+    fun deviceSettingsIntent(): Intent = Intent(Settings.ACTION_SETTINGS).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 
     fun summary(context: Context): String {
@@ -99,7 +93,7 @@ object BackgroundReliability {
         }
     }
 
-    private fun isHonorDevice(): Boolean =
+    fun isHonorDevice(): Boolean =
         Build.MANUFACTURER.equals("HONOR", ignoreCase = true) ||
             Build.BRAND.equals("HONOR", ignoreCase = true)
 

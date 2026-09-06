@@ -4,6 +4,14 @@ Android companion to **Wallhaven Rotator**, built around the public SFW Wallhave
 
 > This project is not affiliated with or endorsed by Wallhaven.
 
+## HONOR background setup
+
+On HONOR, open the phone's **Settings**, search for **App launch** (French: **Lancement des applications**) and select Wallhaven Rotator. Disable **Manage automatically**, then enable **Auto-launch**, **Secondary launch** and **Run in background**. This is separate from Android's battery optimization exemption and exact-alarm access.
+
+The application cannot read the protected HONOR launch-policy state. Its settings therefore keep the instructions visible instead of declaring this OEM setting verified. See [HONOR's background-app guidance](https://www.honor.com/uk/support/content/en-us00406916/).
+
+Installable APKs use a permanent signing key stored only on the owner's PC. Public CI runs tests and compilation without distributing disposable-debug-key APKs. See [SIGNING.md](SIGNING.md) and [RELEASING.md](RELEASING.md).
+
 ## Screenshots
 
 <p align="center">
@@ -81,7 +89,7 @@ The application can check this repository's GitHub Releases and install a newer 
 
 On Android 8.0+, the user may need to grant Wallhaven Rotator permission to **Install unknown apps** before the first OTA installation.
 
-The first published alpha (`0.1.0-alpha.1`) is CI debug-signed. It cannot be upgraded in place to the first persistently signed build. Uninstall that test alpha once before installing the first real signed release; subsequent versions can then use OTA normally with the same signing key.
+Earlier CI alphas used disposable debug signing keys. Migration to the permanent local key requires a one-time, explicitly approved reinstall with a backup of recoverable data. Subsequent builds signed with the permanent key can update in place.
 
 ## Android scheduling caveat
 
@@ -104,19 +112,13 @@ Build locally with a compatible Android SDK:
 gradle :app:testDebugUnitTest :app:assembleDebug
 ```
 
-The regular GitHub Actions workflow runs tests and builds a debug validation APK from source on `main`.
+The regular GitHub Actions workflow runs tests and compiles a debug validation APK from source on `main`. It uploads only test results: its disposable-key APK is not distributed.
 
 ## Signed releases
 
-Real releases use a separate workflow and a persistent Android signing key. The workflow:
+Installable APKs are built with `scripts/Build-SignedLocal.ps1` on the owner's PC and checked against the public certificate fingerprint pinned in the repository. The private key and passwords stay outside the checkout and are never sent to GitHub, including Actions secrets. Only an approved signed APK and public update metadata may be published.
 
-1. restores the keystore from GitHub Actions secrets into the ephemeral runner;
-2. runs release unit tests and builds the signed APK;
-3. verifies the APK signature with `apksigner`;
-4. generates the SHA-256 checksum and OTA manifest;
-5. creates the GitHub Release with the APK and OTA metadata.
-
-See [SIGNING.md](SIGNING.md) before publishing the first real release and [RELEASING.md](RELEASING.md) for the release checklist.
+See [SIGNING.md](SIGNING.md) and [RELEASING.md](RELEASING.md).
 
 ## Privacy
 

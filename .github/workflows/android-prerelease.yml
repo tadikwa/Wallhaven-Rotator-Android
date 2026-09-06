@@ -1,4 +1,4 @@
-name: Android prerelease build
+name: Android validation
 
 on:
   push:
@@ -13,7 +13,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -36,24 +35,18 @@ jobs:
         with:
           gradle-version: '8.13'
 
-      - name: Unit tests and debug APK
+      - name: Unit tests and compilation
         shell: bash
         run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
 
-      - name: Prepare debug artifact
-        shell: bash
-        run: |
-          VERSION_NAME="$(tr -d '\r\n' < VERSION)"
-          APK_NAME="Wallhaven-Rotator-Android-v${VERSION_NAME}.apk"
-          mkdir -p release
-          cp app/build/outputs/apk/debug/app-debug.apk "release/${APK_NAME}"
-          cd release
-          sha256sum "${APK_NAME}" > "${APK_NAME}.sha256"
+      - name: Explain local signing
+        run: echo "Validation only. Installable APKs are signed locally with the persistent key."
 
-      - name: Upload APK artifact
+      - name: Upload unit test results
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: Wallhaven-Rotator-Android-APK
-          path: release/*
-          if-no-files-found: error
+          name: Wallhaven-Rotator-Unit-Tests
+          path: app/build/test-results/testDebugUnitTest/TEST-*.xml
+          if-no-files-found: warn
           retention-days: 14
